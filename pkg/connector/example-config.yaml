@@ -1,0 +1,5 @@
+# Directory where per-user Xplora sessions are stored.
+# Each login gets a subdirectory named after its login ID (E.164 phone number).
+# Credentials are saved here as xplora_credentials.json and fcm_credentials.json.
+# Defaults to "sessions" (relative to bridge working directory).
+sessions_dir: sessions
