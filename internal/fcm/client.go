@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -330,36 +329,19 @@ func (c *Client) handleMCSMessage(persistentID string, payload []byte, appData [
 
 // parseDataMessage parses an FCM push notification payload from Xplora.
 // The exact payload format is unknown until the fcm-probe discovers it.
-// This implementation logs all keys and attempts a best-effort dispatch.
-// Update the key names below after running fcm-probe to discover the structure.
+// Treats the entire raw payload as a NewMessage so the connector can log and
+// inspect it during the discovery phase.
+// TODO: Once fcm-probe reveals the field names, add specific cases here:
+//
+//	if msgData, ok := raw["chatMessage"]; ok {
+//	    return NewMessage{Raw: msgData}, nil
+//	}
 func parseDataMessage(data []byte) (Event, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing FCM payload: %w", err)
 	}
-
-	// TODO: After fcm-probe reveals the payload structure, parse the watch UID
-	// and message content here. Common candidates based on pyxplora_api:
-	// "newMessage", "chatMessage", "message", "chat", "push", etc.
-	//
-	// For now, treat the entire raw payload as a NewMessage so the connector
-	// can inspect and log it during the discovery phase.
-	//
-	// Once the format is known, add specific cases like:
-	//   if msgData, ok := raw["chatMessage"]; ok {
-	//       return NewMessage{Raw: msgData}, nil
-	//   }
-
 	return NewMessage{Raw: data}, nil
-}
-
-// keysOf returns the keys of a map.
-func keysOf[K comparable, V any](m map[K]V) []K {
-	keys := make([]K, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // maxPersistentIDs is the maximum number of persistent IDs to keep.
@@ -493,6 +475,3 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen]
 }
 
-// suppress unused import warning — keysOf is available for future use in parseDataMessage
-var _ = keysOf[string, string]
-var _ = strings.TrimSpace

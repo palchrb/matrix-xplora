@@ -1,0 +1,26 @@
+# Binaries
+/mautrix-xplora
+/fcm-probe
+
+# Session/credential directories
+/sessions/
+/fcm-probe-session/
+
+# Docker volume data
+/data/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

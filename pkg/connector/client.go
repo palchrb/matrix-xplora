@@ -104,12 +104,24 @@ func (c *XploraClient) Connect(ctx context.Context) {
 
 	c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 
-	// Start FCM listener in background.
+	// Start FCM listener in background with exponential backoff.
 	go func() {
+		backoff := 5 * time.Second
+		const maxBackoff = 5 * time.Minute
 		for ctx.Err() == nil {
 			if err := c.fcmClient.Listen(ctx); err != nil && ctx.Err() == nil {
-				c.log.Warn().Err(err).Msg("FCM Listen returned error, retrying in 30s")
-				time.Sleep(30 * time.Second)
+				c.log.Warn().Err(err).Dur("retry_in", backoff).Msg("FCM Listen returned error, retrying")
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				backoff = 5 * time.Second // reset on clean disconnect
 			}
 		}
 	}()

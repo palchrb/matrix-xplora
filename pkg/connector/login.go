@@ -85,10 +85,10 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("Xplora login returned empty token")
 	}
 
-	userID := ""
-	if authResp.User != nil {
-		userID = authResp.User.ID
+	if authResp.User == nil || authResp.User.ID == "" {
+		return nil, fmt.Errorf("Xplora login returned no user ID")
 	}
+	userID := authResp.User.ID
 
 	creds := &xplora.Credentials{
 		Token:        authResp.Token,

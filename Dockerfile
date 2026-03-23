@@ -21,6 +21,7 @@ ENV UID=1337 \
 RUN apk add --no-cache su-exec ca-certificates bash yq-go
 
 COPY --from=builder /build/mautrix-xplora /usr/bin/mautrix-xplora
+COPY --from=builder /build/fcm-probe /usr/bin/fcm-probe
 COPY --from=builder /build/docker-run.sh /docker-run.sh
 
 RUN sed -i 's/\r$//' /docker-run.sh \

@@ -15,3 +15,7 @@ GO_LDFLAGS="-s -w \
 echo "Building mautrix-xplora (mautrix-go ${MAUTRIX_VERSION}, commit ${GIT_COMMIT})..."
 go build -tags goolm -ldflags="${GO_LDFLAGS}" -o mautrix-xplora ./cmd/mautrix-xplora "$@"
 echo "Done: ./mautrix-xplora"
+
+echo "Building fcm-probe..."
+go build -ldflags="${GO_LDFLAGS}" -o fcm-probe ./cmd/fcm-probe "$@"
+echo "Done: ./fcm-probe"
