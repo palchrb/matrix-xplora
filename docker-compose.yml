@@ -1,8 +1,8 @@
 services:
   mautrix-xplora:
-    image: ghcr.io/palchrb/matrix-xplora:latest
-    # Or build locally:
-    # build: .
+    build: .
+    # Once published to GHCR, you can switch to:
+    # image: ghcr.io/palchrb/matrix-xplora:latest
     container_name: mautrix-xplora
     restart: unless-stopped
     volumes:
