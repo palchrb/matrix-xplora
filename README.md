@@ -28,7 +28,7 @@ Bridges the Xplora parent app chat to Matrix, so you can message your child's wa
 
 ```sh
 ./build.sh
-```
+```  
 
 This produces `./mautrix-xplora` (the bridge) and `./fcm-probe` (FCM diagnostic tool).
 
