@@ -3,14 +3,40 @@
 // messaging, and device/watch management.
 package xplora
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// flexString unmarshals a JSON value that may be either a string or a number,
+// storing the result as a plain string. The Xplora API returns expireDate as a
+// numeric Unix-ms timestamp in some responses and as an ISO-8601 string in others.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(data []byte) error {
+	// Try string first.
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = flexString(s)
+		return nil
+	}
+	// Fall back to number — store raw digits as string.
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexString(n.String())
+		return nil
+	}
+	return fmt.Errorf("flexString: cannot unmarshal %s", string(data))
+}
+
 // AuthResponse is returned by the signInWithEmailOrPhone mutation.
 type AuthResponse struct {
-	ID           string   `json:"id"`
-	Token        string   `json:"token"`
-	RefreshToken string   `json:"refreshToken"`
-	ExpireDate   string   `json:"expireDate"` // ISO8601 string
-	User         *UserRef `json:"user"`
-	W360         *W360    `json:"w360"`
+	ID           string     `json:"id"`
+	Token        string     `json:"token"`
+	RefreshToken string     `json:"refreshToken"`
+	ExpireDate   flexString `json:"expireDate"`
+	User         *UserRef   `json:"user"`
+	W360         *W360      `json:"w360"`
 }
 
 // UserRef is a brief user reference embedded in AuthResponse and ChatMessage.
@@ -28,11 +54,11 @@ type W360 struct {
 
 // RefreshTokenResponse is returned by the refreshToken mutation.
 type RefreshTokenResponse struct {
-	ID           string `json:"id"`
-	Token        string `json:"token"`
-	RefreshToken string `json:"refreshToken"`
-	ExpireDate   string `json:"expireDate"`
-	Valid         bool   `json:"valid"`
+	ID           string     `json:"id"`
+	Token        string     `json:"token"`
+	RefreshToken string     `json:"refreshToken"`
+	ExpireDate   flexString `json:"expireDate"`
+	Valid        bool       `json:"valid"`
 }
 
 // WatchInfo represents a child's smartwatch linked to the parent account.

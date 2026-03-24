@@ -93,7 +93,7 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 	creds := &xplora.Credentials{
 		Token:        authResp.Token,
 		RefreshToken: authResp.RefreshToken,
-		ExpireDate:   authResp.ExpireDate,
+		ExpireDate:   string(authResp.ExpireDate),
 		UserID:       userID,
 	}
 	if err := auth.SetCredentials(creds); err != nil {
