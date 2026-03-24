@@ -14,6 +14,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/matrix"
+	"maunium.net/go/mautrix/id"
 )
 
 // XploraConnector is the top-level NetworkConnector for the bridge.
@@ -67,9 +69,19 @@ func (xc *XploraConnector) GetBridgeInfoVersion() (info, capabilities int) {
 }
 
 func (xc *XploraConnector) GetName() bridgev2.BridgeName {
+	var networkIcon id.ContentURIString
+	if xc.br != nil {
+		if mc, ok := xc.br.Matrix.(*matrix.Connector); ok {
+			avatar := mc.Config.AppService.Bot.Avatar
+			if avatar != "" && avatar != "remove" {
+				networkIcon = id.ContentURIString(avatar)
+			}
+		}
+	}
 	return bridgev2.BridgeName{
 		DisplayName:      "Xplora",
 		NetworkURL:       "https://www.xplora.com/",
+		NetworkIcon:      networkIcon,
 		NetworkID:        "xplora",
 		BeeperBridgeType: "github.com/palchrb/matrix-xplora",
 		DefaultPort:      29341,

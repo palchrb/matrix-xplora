@@ -105,6 +105,9 @@ func (c *Client) GetWatches(ctx context.Context, uid string) ([]WatchInfo, error
 		return nil, err
 	}
 
+	// TODO: remove after verifying correct field name
+	fmt.Printf("[DEBUG GetWatches] raw response: %s\n", string(data))
+
 	var result struct {
 		Watches []WatchInfo `json:"watches"`
 	}

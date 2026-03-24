@@ -82,6 +82,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	// Sync portals (one per child watch) on every connect.
 	go c.syncWatches(ctx)
 
+	// Keep the space room avatar in sync with the bot's configured avatar.
+	go c.ensureSpaceAvatar(ctx)
+
 	// Try FCM. Fall back to polling on any failure.
 	sessDir := c.connector.sessionDir(c.userLogin.ID)
 	c.fcmClient = fcm.NewClient(sessDir)
@@ -149,6 +152,26 @@ func (c *XploraClient) Connect(ctx context.Context) {
 func (c *XploraClient) Disconnect() {
 	c.stopPolling()
 	// FCM client stops when the context passed to Listen() is cancelled.
+}
+
+// ensureSpaceAvatar updates the space room's m.room.avatar to match the
+// NetworkIcon returned by GetName() (which uses the bot's configured avatar).
+// Called on every Connect() so that avatar changes in config.yaml take effect
+// on the next restart without needing to recreate the space room.
+func (c *XploraClient) ensureSpaceAvatar(ctx context.Context) {
+	icon := c.connector.br.Network.GetName().NetworkIcon
+	if icon == "" {
+		return
+	}
+	spaceRoom, err := c.userLogin.GetSpaceRoom(ctx)
+	if err != nil || spaceRoom == "" {
+		return
+	}
+	if _, err := c.userLogin.Bridge.Bot.SendState(ctx, spaceRoom, event.StateRoomAvatar, "", &event.Content{
+		Parsed: &event.RoomAvatarEventContent{URL: icon},
+	}, time.Now()); err != nil {
+		c.log.Warn().Err(err).Msg("Failed to update space room avatar")
+	}
 }
 
 // IsLoggedIn returns true if a token is present.
