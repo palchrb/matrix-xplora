@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/palchrb/matrix-xplora/internal/xplora"
@@ -123,8 +125,12 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		}
 	}
 
-	// Generate a stable ClientID for FCM registration (reused forever).
-	clientID := uuid.New().String()
+	// Load or generate a stable ClientID for FCM registration.
+	// The ClientID identifies the virtual Android device registered with Google.
+	// It must survive logout+login cycles: re-registering a new device on every
+	// login causes Google rate-limiting and makes Xplora route pushes to the
+	// old device until the association is refreshed.
+	clientID := loadOrCreateClientID(sessDir)
 
 	meta := &UserLoginMetadata{
 		PhoneNumber: phone,
@@ -164,3 +170,18 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 
 // Cancel is called if the user aborts. No open connections to tear down.
 func (xl *XploraLogin) Cancel() {}
+
+// loadOrCreateClientID reads the persisted FCM client UUID from dir/client_id.txt,
+// or generates and saves a new one if the file is absent or empty.
+// The file is NOT removed by LogoutRemote, so the UUID survives logout+re-login.
+func loadOrCreateClientID(dir string) string {
+	path := filepath.Join(dir, "client_id.txt")
+	if data, err := os.ReadFile(path); err == nil {
+		if id := strings.TrimSpace(string(data)); id != "" {
+			return id
+		}
+	}
+	id := uuid.New().String()
+	_ = os.WriteFile(path, []byte(id), 0o600)
+	return id
+}

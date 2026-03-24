@@ -125,4 +125,38 @@ query ReadMyInfo {
     name
   }
 }`
+
+	// QueryFetchChatImage fetches the download URL for an image message attachment.
+	QueryFetchChatImage = `
+query FetchChatImage($uid: String!, $msgId: String!) {
+  fetchChatImage(uid: $uid, msgId: $msgId)
+}`
+
+	// QueryFetchChatVoice fetches the download URL for a voice message attachment.
+	QueryFetchChatVoice = `
+query FetchChatVoice($uid: String!, $msgId: String!) {
+  fetchChatVoice(uid: $uid, msgId: $msgId)
+}`
+
+	// QueryAskWatchLocate requests the watch to send a fresh GPS fix to the server.
+	QueryAskWatchLocate = `
+query AskWatchLocate($uid: String!) {
+  askWatchLocate(uid: $uid)
+}`
+
+	// QueryWatchLastLocate returns the most recent known location of a watch.
+	QueryWatchLastLocate = `
+query WatchLastLocate($uid: String!) {
+  watchLastLocate(uid: $uid) {
+    tm
+    lat
+    lng
+    addr
+    poi
+    city
+    battery
+    isCharging
+    locateType
+  }
+}`
 )

@@ -141,3 +141,59 @@ func (c *Client) SetReadChatMsg(ctx context.Context, wuid, msgID string) error {
 	_, err := c.do(ctx, MutationSetReadChatMsg, vars)
 	return err
 }
+
+// FetchChatImage returns the download URL for an image message.
+func (c *Client) FetchChatImage(ctx context.Context, wuid, msgID string) (string, error) {
+	vars := map[string]any{"uid": wuid, "msgId": msgID}
+	data, err := c.do(ctx, QueryFetchChatImage, vars)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		FetchChatImage string `json:"fetchChatImage"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing fetchChatImage response: %w", err)
+	}
+	return result.FetchChatImage, nil
+}
+
+// FetchChatVoice returns the download URL for a voice message.
+func (c *Client) FetchChatVoice(ctx context.Context, wuid, msgID string) (string, error) {
+	vars := map[string]any{"uid": wuid, "msgId": msgID}
+	data, err := c.do(ctx, QueryFetchChatVoice, vars)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		FetchChatVoice string `json:"fetchChatVoice"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing fetchChatVoice response: %w", err)
+	}
+	return result.FetchChatVoice, nil
+}
+
+// AskWatchLocate requests the watch to push a fresh GPS fix to the server.
+// Returns an error if the API call fails, but the watch's response is asynchronous.
+func (c *Client) AskWatchLocate(ctx context.Context, wuid string) error {
+	vars := map[string]any{"uid": wuid}
+	_, err := c.do(ctx, QueryAskWatchLocate, vars)
+	return err
+}
+
+// GetWatchLastLocation returns the most recent known location of a watch.
+func (c *Client) GetWatchLastLocation(ctx context.Context, wuid string) (*LocationInfo, error) {
+	vars := map[string]any{"uid": wuid}
+	data, err := c.do(ctx, QueryWatchLastLocate, vars)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		WatchLastLocate LocationInfo `json:"watchLastLocate"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parsing watchLastLocate response: %w", err)
+	}
+	return &result.WatchLastLocate, nil
+}

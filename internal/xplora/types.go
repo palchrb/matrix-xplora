@@ -134,3 +134,18 @@ type ChatsResponse struct {
 	Limit  int           `json:"limit"`
 	List   []ChatMessage `json:"list"`
 }
+
+// LocationInfo is the response from the watchLastLocate query.
+// Tm is a Unix timestamp (seconds or milliseconds depending on API version).
+// Lat/Lng are decimal degrees. Battery is a percentage 0–100.
+type LocationInfo struct {
+	Tm         int64   `json:"tm"`
+	Lat        float64 `json:"lat"`
+	Lng        float64 `json:"lng"`
+	Addr       string  `json:"addr"`
+	Poi        string  `json:"poi"`
+	City       string  `json:"city"`
+	Battery    int     `json:"battery"`
+	IsCharging bool    `json:"isCharging"`
+	LocateType string  `json:"locateType"`
+}
