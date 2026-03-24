@@ -47,22 +47,22 @@ func (c *XploraClient) convertChatMessage(
 	}, nil
 }
 
-// extractMessageText parses the `data` JSON blob from the Xplora API response.
-// The data field is a JSON string containing type-specific content.
+// extractMessageText parses the `data` JSON value from the Xplora API response.
+// data can be a JSON string, a JSON object with a "text" field, or absent.
 // For TEXT messages it contains the text body; other types get a fallback label.
 func extractMessageText(msg xplora.ChatMessage) string {
 	msgType := derefStr(msg.Type)
 
-	if msg.Data != nil && *msg.Data != "" {
-		// data is a JSON-encoded string: first try plain string value
+	if len(msg.Data) > 0 && string(msg.Data) != "null" {
+		// data may be a plain JSON string
 		var text string
-		if err := json.Unmarshal([]byte(*msg.Data), &text); err == nil && text != "" {
+		if err := json.Unmarshal(msg.Data, &text); err == nil && text != "" {
 			return text
 		}
 
 		// data may be a JSON object with a "text" field
 		var obj map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(*msg.Data), &obj); err == nil {
+		if err := json.Unmarshal(msg.Data, &obj); err == nil {
 			if raw, ok := obj["text"]; ok {
 				var text string
 				if err := json.Unmarshal(raw, &text); err == nil && text != "" {
@@ -72,7 +72,7 @@ func extractMessageText(msg xplora.ChatMessage) string {
 		}
 
 		// Return raw data for unknown structure so nothing is silently lost
-		return fmt.Sprintf("[%s: %s]", msgType, *msg.Data)
+		return fmt.Sprintf("[%s: %s]", msgType, string(msg.Data))
 	}
 
 	// No data — use human-readable type label as fallback
