@@ -24,7 +24,7 @@ func (c *XploraClient) convertChatMessage(
 
 	ts := time.Now()
 	if msg.Create != nil {
-		ts = time.UnixMilli(*msg.Create)
+		ts = time.Unix(*msg.Create, 0) // Xplora chatsNew create is Unix seconds
 	}
 
 	msgType := derefStr(msg.Type)
@@ -54,6 +54,18 @@ func extractMessageText(msg xplora.ChatMessage) string {
 	msgType := derefStr(msg.Type)
 
 	if len(msg.Data) > 0 && string(msg.Data) != "null" {
+		// Type-specific structured parsing before the generic fallback.
+		switch msgType {
+		case "CALL_LOG":
+			if text := formatCallLog(msg.Data); text != "" {
+				return text
+			}
+		case "EMOTICON":
+			if text := formatEmoticon(msg.Data); text != "" {
+				return text
+			}
+		}
+
 		// data may be a plain JSON string
 		var text string
 		if err := json.Unmarshal(msg.Data, &text); err == nil && text != "" {
@@ -64,9 +76,9 @@ func extractMessageText(msg xplora.ChatMessage) string {
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(msg.Data, &obj); err == nil {
 			if raw, ok := obj["text"]; ok {
-				var text string
-				if err := json.Unmarshal(raw, &text); err == nil && text != "" {
-					return text
+				var t string
+				if err := json.Unmarshal(raw, &t); err == nil && t != "" {
+					return t
 				}
 			}
 		}
@@ -99,6 +111,50 @@ func extractMessageText(msg xplora.ChatMessage) string {
 		}
 		return "[Xplora message]"
 	}
+}
+
+// formatCallLog parses CALL_LOG data and returns a human-readable description.
+// Expected fields: call_type ("incoming"/"outgoing"/"missed"), call_name, duration (seconds).
+func formatCallLog(data json.RawMessage) string {
+	var d struct {
+		CallType string `json:"call_type"`
+		CallName string `json:"call_name"`
+		Duration int    `json:"duration"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.CallName == "" {
+		return ""
+	}
+	switch d.CallType {
+	case "incoming":
+		if d.Duration > 0 {
+			return fmt.Sprintf("[Incoming call from %s (%ds)]", d.CallName, d.Duration)
+		}
+		return fmt.Sprintf("[Incoming call from %s]", d.CallName)
+	case "outgoing":
+		if d.Duration > 0 {
+			return fmt.Sprintf("[Call to %s (%ds)]", d.CallName, d.Duration)
+		}
+		return fmt.Sprintf("[Call to %s]", d.CallName)
+	case "missed":
+		return fmt.Sprintf("[Missed call from %s]", d.CallName)
+	default:
+		return fmt.Sprintf("[Call with %s]", d.CallName)
+	}
+}
+
+// formatEmoticon parses EMOTICON data and returns a human-readable description.
+// Expected fields: sender_name, emoticon_id.
+func formatEmoticon(data json.RawMessage) string {
+	var d struct {
+		SenderName string `json:"sender_name"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return ""
+	}
+	if d.SenderName != "" {
+		return fmt.Sprintf("[Sticker from %s]", d.SenderName)
+	}
+	return "[Sticker]"
 }
 
 func derefStr(s *string) string {

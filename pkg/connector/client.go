@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -299,17 +300,130 @@ func (c *XploraClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev
 // ─── FCM and polling ──────────────────────────────────────────────────────────
 
 // handleFCMMessage is called by the FCM OnMessage callback.
-// Since the Xplora FCM payload format is unknown until the fcm-probe tool
-// discovers it, this implementation falls back to polling all watches.
-// Update after running fcm-probe to parse the payload and dispatch directly.
+// It tries to parse the Xplora FCM payload directly (discovered via fcm-probe):
+//
+//	{"content":{"msg_id":<int64>,"msg_type":"chat_text","receiver":"<wuid>",
+//	            "sender":"<userID>","text":"...","time":<unix_ms>},...}
+//
+// On success, the message is dispatched without a full poll, preventing
+// history replay. Falls back to polling all watches if parsing fails.
 func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 	c.log.Debug().RawJSON("fcm_payload", msg.Raw).Msg("Received FCM push from Xplora")
 
-	// TODO: After fcm-probe reveals the payload structure, parse the watch UID
-	// and message content here and call dispatchChatMessage directly.
-	// For now, trigger a poll on all watches so nothing is lost.
+	if chatMsg, wuid, ok := c.parseFCMPayload(msg.Raw); ok {
+		isFromMe := chatMsg.Sender != nil && chatMsg.Sender.ID == c.meta.UserID
+		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
+		c.updateLastMsgID(wuid, chatMsg.MsgID)
+		return
+	}
+
+	// Unknown payload type — fall back to polling so nothing is lost.
 	ctx := c.userLogin.Log.WithContext(context.Background())
 	c.pollAllWatches(ctx)
+}
+
+// parseFCMPayload parses an Xplora FCM push notification payload.
+// Returns the synthetic ChatMessage, the target watch UID, and true on success.
+// The wuid is determined by matching sender/receiver against known children.
+func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, bool) {
+	var envelope struct {
+		Content *struct {
+			MsgID    int64  `json:"msg_id"`
+			MsgType  string `json:"msg_type"`
+			Receiver string `json:"receiver"`
+			Sender   string `json:"sender"`
+			Text     string `json:"text"`
+			Time     int64  `json:"time"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
+		return xplora.ChatMessage{}, "", false
+	}
+	ct := envelope.Content
+	if ct.MsgID == 0 || ct.MsgType == "" {
+		return xplora.ChatMessage{}, "", false
+	}
+
+	// Identify the watch UID: the child's ID is either the receiver
+	// (parent→child message) or the sender (child→parent message).
+	wuid := ""
+	for _, w := range c.meta.Children {
+		childUID := w.ChildUID()
+		if ct.Receiver == childUID || ct.Sender == childUID {
+			wuid = childUID
+			break
+		}
+	}
+	if wuid == "" {
+		c.log.Debug().
+			Str("sender", ct.Sender).
+			Str("receiver", ct.Receiver).
+			Msg("FCM direct parse: could not match sender/receiver to a known child")
+		return xplora.ChatMessage{}, "", false
+	}
+
+	msgIDStr := fmt.Sprintf("%d", ct.MsgID)
+	msgType := fcmMsgTypeToXplora(ct.MsgType)
+
+	// Encode text as a JSON string so extractMessageText can parse it.
+	var dataJSON json.RawMessage
+	if ct.Text != "" {
+		dataJSON, _ = json.Marshal(ct.Text)
+	}
+
+	var senderRef *xplora.UserRef
+	if ct.Sender != "" {
+		senderRef = &xplora.UserRef{ID: ct.Sender}
+	}
+
+	// FCM time is Unix milliseconds; convert to seconds to match chatsNew.
+	createSec := ct.Time / 1000
+
+	return xplora.ChatMessage{
+		ID:     msgIDStr,
+		MsgID:  msgIDStr,
+		Type:   &msgType,
+		Sender: senderRef,
+		Data:   dataJSON,
+		Create: &createSec,
+	}, wuid, true
+}
+
+// fcmMsgTypeToXplora maps an FCM msg_type value to the Xplora API type label
+// used in chatsNew responses, so both paths produce consistent message types.
+func fcmMsgTypeToXplora(fcmType string) string {
+	switch fcmType {
+	case "chat_text":
+		return "TEXT"
+	case "chat_image":
+		return "IMAGE"
+	case "chat_voice":
+		return "VOICE"
+	case "chat_emoticon":
+		return "EMOTICON"
+	default:
+		return fcmType
+	}
+}
+
+// updateLastMsgID advances the LastMsgID cursor in portal metadata if msgID is newer.
+func (c *XploraClient) updateLastMsgID(wuid, msgID string) {
+	if msgID == "" {
+		return
+	}
+	ctx := c.userLogin.Log.WithContext(context.Background())
+	portalKey := networkid.PortalKey{
+		ID:       portalIDFromWUID(wuid),
+		Receiver: c.userLogin.ID,
+	}
+	portal, err := c.userLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil || portal == nil {
+		return
+	}
+	if meta, ok := portal.Metadata.(*PortalMetadata); ok && msgID > meta.LastMsgID {
+		meta.LastMsgID = msgID
+		portal.Save(ctx)
+	}
 }
 
 // startPolling begins a 30-second polling loop over chatsNew for all watches.
@@ -357,6 +471,9 @@ func (c *XploraClient) pollAllWatches(ctx context.Context) {
 }
 
 // pollWatch fetches recent messages for a single watch and dispatches new ones.
+// On the first call (LastMsgID == ""), it only initialises the cursor to the
+// newest message without dispatching history. This prevents a flood of old
+// messages from appearing in the Matrix room on first connection.
 func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 	portalKey := networkid.PortalKey{
 		ID:       portalIDFromWUID(wuid),
@@ -377,30 +494,42 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
 		return
 	}
+	if len(msgs) == 0 {
+		return
+	}
 
-	// Find new messages (those with MsgID > lastMsgID, or all if lastMsgID is empty).
+	newest := msgs[0].MsgID
+
+	// First poll: just set the cursor without dispatching history.
+	if lastMsgID == "" {
+		if portal != nil {
+			if meta, ok := portal.Metadata.(*PortalMetadata); ok && newest > meta.LastMsgID {
+				meta.LastMsgID = newest
+				portal.Save(ctx)
+				c.log.Debug().Str("wuid", wuid).Str("cursor", newest).Msg("Poll: cursor initialised, no history dispatched")
+			}
+		}
+		return
+	}
+
+	// Find messages newer than the cursor and dispatch them in chronological order.
 	var newMsgs []xplora.ChatMessage
 	for _, msg := range msgs {
-		if lastMsgID == "" || msg.MsgID > lastMsgID {
+		if msg.MsgID > lastMsgID {
 			newMsgs = append(newMsgs, msg)
 		}
 	}
-
-	// Dispatch in chronological order (reverse of typical API response).
 	for i := len(newMsgs) - 1; i >= 0; i-- {
 		msg := newMsgs[i]
 		isFromMe := msg.Sender != nil && msg.Sender.ID == c.meta.UserID
 		c.dispatchChatMessage(wuid, msg, isFromMe)
 	}
 
-	// Update last seen message ID.
-	if len(msgs) > 0 && portal != nil {
-		if meta, ok := portal.Metadata.(*PortalMetadata); ok {
-			newest := msgs[0].MsgID
-			if newest > meta.LastMsgID {
-				meta.LastMsgID = newest
-				portal.Save(ctx)
-			}
+	// Advance the cursor.
+	if portal != nil {
+		if meta, ok := portal.Metadata.(*PortalMetadata); ok && newest > meta.LastMsgID {
+			meta.LastMsgID = newest
+			portal.Save(ctx)
 		}
 	}
 }
@@ -409,7 +538,7 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, isFromMe bool) {
 	tm := time.Now()
 	if msg.Create != nil {
-		tm = time.UnixMilli(*msg.Create)
+		tm = time.Unix(*msg.Create, 0) // Xplora chatsNew create is Unix seconds
 	}
 
 	sender := ghostIDFromWUID(wuid)
