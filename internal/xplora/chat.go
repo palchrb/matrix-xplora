@@ -7,9 +7,8 @@ import (
 	"fmt"
 )
 
-// SignIn authenticates with phone+password.
-// Populates auth credentials on success; this is the only method that can
-// be called when auth.Token() is empty.
+// SignIn authenticates with phone+password and stores the resulting token.
+// This is the only method callable when auth.Token() is empty.
 func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string) (*AuthResponse, error) {
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
@@ -32,22 +31,50 @@ func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("parsing signIn response: %w", err)
 	}
-	return &result.SignInWithEmailOrPhone, nil
+
+	resp := &result.SignInWithEmailOrPhone
+
+	// If the server returned w360 tokens, update the client to use them
+	// for all subsequent H-BackDoor-Authorization headers.
+	if resp.W360 != nil && resp.W360.Token != "" && resp.W360.Secret != "" {
+		c.setW360(resp.W360.Token, resp.W360.Secret)
+	}
+
+	return resp, nil
+}
+
+// RefreshToken exchanges a refresh token for a new access token.
+func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string) (*RefreshTokenResponse, error) {
+	vars := map[string]any{
+		"uid":          uid,
+		"refreshToken": refreshToken,
+	}
+	data, err := c.do(ctx, MutationRefreshToken, vars)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		RefreshToken RefreshTokenResponse `json:"refreshToken"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parsing refreshToken response: %w", err)
+	}
+	return &result.RefreshToken, nil
 }
 
 // SetFCMToken registers an FCM token with the Xplora backend.
 // clientID is a UUID generated once per login and reused across reconnects.
-func (c *Client) SetFCMToken(ctx context.Context, uid, clientID, fcmToken string) error {
+func (c *Client) SetFCMToken(ctx context.Context, clientID, fcmToken string) error {
 	vars := map[string]any{
-		"uid":         uid,
-		"key":         fcmToken,
-		"clientId":    clientID,
-		"deviceName":  "mautrix-xplora",
-		"deviceOs":    "Android",
-		"deviceOsVer": "13",
-		"deviceBrand": "Google",
-		"deviceModel": "Pixel 7",
-		"type":        1, // Android push type
+		"clientId":     clientID,
+		"fcmToken":     fcmToken,
+		"manufacturer": "Google",
+		"brand":        "Google",
+		"model":        "Pixel 7",
+		"osVer":        "13",
+		"userLang":     "en",
+		"timeZone":     "UTC",
 	}
 	_, err := c.do(ctx, MutationSetFCMToken, vars)
 	return err
@@ -70,6 +97,7 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 }
 
 // GetWatches returns the list of children's watches linked to this account.
+// uid is the parent's user ID.
 func (c *Client) GetWatches(ctx context.Context, uid string) ([]WatchInfo, error) {
 	vars := map[string]any{"uid": uid}
 	data, err := c.do(ctx, QueryWatches, vars)
@@ -86,13 +114,16 @@ func (c *Client) GetWatches(ctx context.Context, uid string) ([]WatchInfo, error
 	return result.Watches, nil
 }
 
-// GetChats fetches paginated chat messages for a given watch UID.
-// Returns messages in the order the API returns them (typically newest first).
-func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int) ([]ChatMessage, error) {
+// GetChats fetches paginated chat messages for a given watch's child user ID.
+// msgID optionally filters to messages after a given message ID.
+func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, error) {
 	vars := map[string]any{
 		"uid":    wuid,
 		"offset": offset,
 		"limit":  limit,
+	}
+	if msgID != "" {
+		vars["msgId"] = msgID
 	}
 	data, err := c.do(ctx, QueryChats, vars)
 	if err != nil {

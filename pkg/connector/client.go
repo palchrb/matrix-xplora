@@ -51,14 +51,32 @@ func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplor
 
 // Connect validates the session, syncs portals, and starts FCM or polling.
 func (c *XploraClient) Connect(ctx context.Context) {
+	// Proactively refresh the token if it is near expiry.
+	if c.auth.NeedsRefresh() {
+		if err := c.tryRefreshToken(ctx); err != nil {
+			c.log.Warn().Err(err).Msg("Token refresh failed on connect")
+		}
+	}
+
 	// Validate session with a lightweight API call.
 	if _, err := c.gql.GetMyInfo(ctx); err != nil {
-		c.userLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "xplora-auth-error",
-			Message:    "Failed to connect to Xplora API: " + err.Error(),
-		})
-		return
+		// Token may have expired mid-session; try refreshing once before giving up.
+		if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
+			c.userLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateBadCredentials,
+				Error:      "xplora-auth-error",
+				Message:    "Failed to connect to Xplora API: " + err.Error(),
+			})
+			return
+		}
+		if _, err2 := c.gql.GetMyInfo(ctx); err2 != nil {
+			c.userLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateBadCredentials,
+				Error:      "xplora-auth-error",
+				Message:    "Failed to connect to Xplora API: " + err2.Error(),
+			})
+			return
+		}
 	}
 
 	// Sync portals (one per child watch) on every connect.
@@ -93,7 +111,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 
 	// Register the FCM token with the Xplora backend.
-	if err := c.gql.SetFCMToken(ctx, c.meta.UserID, c.meta.ClientID, fcmToken); err != nil {
+	if err := c.gql.SetFCMToken(ctx, c.meta.ClientID, fcmToken); err != nil {
 		c.log.Warn().Err(err).Msg("setFCMToken failed, starting polling fallback")
 		c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 		c.startPolling(ctx)
@@ -187,12 +205,8 @@ func (c *XploraClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (
 		return &bridgev2.UserInfo{Name: ptrStr(wuid)}, nil
 	}
 	for _, w := range watches {
-		if w.UID == wuid {
-			name := wuid
-			if w.Name != nil {
-				name = *w.Name
-			}
-			return &bridgev2.UserInfo{Name: ptrStr(name)}, nil
+		if w.ChildUID() == wuid {
+			return &bridgev2.UserInfo{Name: ptrStr(w.ChildName())}, nil
 		}
 	}
 	return &bridgev2.UserInfo{Name: ptrStr(wuid)}, nil
@@ -305,7 +319,7 @@ func (c *XploraClient) pollAllWatches(ctx context.Context) {
 		return
 	}
 	for _, w := range watches {
-		c.pollWatch(ctx, w.UID)
+		c.pollWatch(ctx, w.ChildUID())
 	}
 }
 
@@ -325,7 +339,7 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		}
 	}
 
-	msgs, err := c.gql.GetChats(ctx, wuid, 0, 20)
+	msgs, err := c.gql.GetChats(ctx, wuid, 0, 20, lastMsgID)
 	if err != nil {
 		c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
 		return
@@ -341,7 +355,9 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 
 	// Dispatch in chronological order (reverse of typical API response).
 	for i := len(newMsgs) - 1; i >= 0; i-- {
-		c.dispatchChatMessage(wuid, newMsgs[i], false)
+		msg := newMsgs[i]
+		isFromMe := msg.Sender != nil && msg.Sender.ID == c.meta.UserID
+		c.dispatchChatMessage(wuid, msg, isFromMe)
 	}
 
 	// Update last seen message ID.
@@ -359,9 +375,8 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 // dispatchChatMessage queues a chat message as a Matrix remote event.
 func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, isFromMe bool) {
 	tm := time.Now()
-	if msg.Tm != nil {
-		// Assume milliseconds; update to time.Unix(*msg.Tm, 0) if seconds.
-		tm = time.UnixMilli(*msg.Tm)
+	if msg.Create != nil {
+		tm = time.UnixMilli(*msg.Create)
 	}
 
 	sender := ghostIDFromWUID(wuid)
@@ -403,13 +418,11 @@ func (c *XploraClient) syncWatches(ctx context.Context) {
 
 // ensureWatchPortal creates or updates the portal for a child's watch.
 func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo) {
+	wuid := w.ChildUID()
+	childName := w.ChildName()
 	portalKey := networkid.PortalKey{
-		ID:       portalIDFromWUID(w.UID),
+		ID:       portalIDFromWUID(wuid),
 		Receiver: c.userLogin.ID,
-	}
-	childName := w.UID
-	if w.Name != nil {
-		childName = *w.Name
 	}
 	// Queue a portal info update event to ensure the room exists.
 	c.userLogin.Bridge.QueueRemoteEvent(c.userLogin, &simplevent.ChatResync{
@@ -425,7 +438,7 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 					Membership:  event.MembershipJoin,
 				},
 				{
-					EventSender: bridgev2.EventSender{Sender: ghostIDFromWUID(w.UID)},
+					EventSender: bridgev2.EventSender{Sender: ghostIDFromWUID(wuid)},
 					Membership:  event.MembershipJoin,
 				},
 			}
@@ -440,8 +453,8 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 						portal.Metadata = meta
 					}
 					changed := false
-					if meta.WUID != w.UID {
-						meta.WUID = w.UID
+					if meta.WUID != wuid {
+						meta.WUID = wuid
 						changed = true
 					}
 					if meta.ChildName != childName {
@@ -453,6 +466,34 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 			}, nil
 		},
 	})
+}
+
+// tryRefreshToken exchanges the stored refresh token for a new access token
+// and saves the updated credentials to disk.
+func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
+	uid := c.auth.UserID()
+	refreshToken := c.auth.RefreshToken()
+	if uid == "" || refreshToken == "" {
+		return fmt.Errorf("no refresh token available")
+	}
+	resp, err := c.gql.RefreshToken(ctx, uid, refreshToken)
+	if err != nil {
+		return fmt.Errorf("refreshToken: %w", err)
+	}
+	if !resp.Valid || resp.Token == "" {
+		return fmt.Errorf("refreshToken: server returned invalid token")
+	}
+	creds := &xplora.Credentials{
+		Token:        resp.Token,
+		RefreshToken: resp.RefreshToken,
+		ExpireDate:   resp.ExpireDate,
+		UserID:       uid,
+	}
+	if err := c.auth.SetCredentials(creds); err != nil {
+		return fmt.Errorf("saving refreshed credentials: %w", err)
+	}
+	c.log.Info().Msg("Access token refreshed successfully")
+	return nil
 }
 
 // ptrStr returns a pointer to a string (helper for bridgev2 APIs).
