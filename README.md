@@ -1,4 +1,4 @@
-# matrix-xplora
+# matrix-xplora  
 
 A Matrix bridge for the [Xplora](https://www.xplora.eu/) children's smartwatch platform, built with [mautrix-go](https://github.com/maunium/mautrix-go).
 
