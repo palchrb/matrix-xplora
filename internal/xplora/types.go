@@ -31,15 +31,27 @@ func (f *flexString) UnmarshalJSON(data []byte) error {
 
 // AuthResponse is returned by the signInWithEmailOrPhone mutation.
 type AuthResponse struct {
-	ID           string     `json:"id"`
-	Token        string     `json:"token"`
-	RefreshToken string     `json:"refreshToken"`
-	ExpireDate   flexString `json:"expireDate"`
-	User         *UserRef   `json:"user"`
-	W360         *W360      `json:"w360"`
+	ID           string        `json:"id"`
+	Token        string        `json:"token"`
+	RefreshToken string        `json:"refreshToken"`
+	ExpireDate   flexString    `json:"expireDate"`
+	User         *AuthUser     `json:"user"`
+	W360         *W360         `json:"w360"`
 }
 
-// UserRef is a brief user reference embedded in AuthResponse and ChatMessage.
+// AuthUser is the user object returned in the sign-in response.
+// It includes the parent's ID and the list of linked child watches.
+type AuthUser struct {
+	ID       string       `json:"id"`
+	Children []ChildEntry `json:"children"`
+}
+
+// ChildEntry is a guardian-ward relationship in the sign-in response.
+type ChildEntry struct {
+	Ward *UserRef `json:"ward"`
+}
+
+// UserRef is a brief user reference embedded in ChildEntry and ChatMessage.
 type UserRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

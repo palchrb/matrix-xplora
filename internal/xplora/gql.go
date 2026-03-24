@@ -28,6 +28,12 @@ mutation signInWithEmailOrPhone(
     expireDate
     user {
       id
+      children {
+        ward {
+          id
+          name
+        }
+      }
     }
     w360 {
       token
@@ -105,20 +111,6 @@ query Chats($uid: String!, $offset: Int, $limit: Int, $msgId: String) {
       }
       data
       create
-    }
-  }
-}`
-
-	// QueryWatches returns all child watches linked to a parent account.
-	// user.id is the child's user ID used as the UID for chatsNew.
-	QueryWatches = `
-query Watches($uid: String) {
-  watches(uid: $uid) {
-    id
-    name
-    user {
-      id
-      name
     }
   }
 }`

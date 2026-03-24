@@ -221,13 +221,9 @@ func (c *XploraClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (
 }
 
 // GetUserInfo returns ghost profile data for a child's watch.
-func (c *XploraClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+func (c *XploraClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	wuid := string(ghost.ID)
-	watches, err := c.gql.GetWatches(ctx, c.meta.UserID)
-	if err != nil {
-		return &bridgev2.UserInfo{Name: ptrStr(wuid)}, nil
-	}
-	for _, w := range watches {
+	for _, w := range c.meta.Children {
 		if w.ChildUID() == wuid {
 			return &bridgev2.UserInfo{Name: ptrStr(w.ChildName())}, nil
 		}
@@ -336,14 +332,8 @@ func (c *XploraClient) pollLoop(ctx context.Context) {
 
 // pollAllWatches fetches new messages for all linked watches.
 func (c *XploraClient) pollAllWatches(ctx context.Context) {
-	c.log.Debug().Msg("Polling Xplora watches")
-	watches, err := c.gql.GetWatches(ctx, c.meta.UserID)
-	if err != nil {
-		c.log.Warn().Err(err).Msg("Poll: failed to get watches")
-		return
-	}
-	c.log.Debug().Int("count", len(watches)).Msg("Poll: got watches")
-	for _, w := range watches {
+	c.log.Debug().Int("count", len(c.meta.Children)).Msg("Polling Xplora watches")
+	for _, w := range c.meta.Children {
 		c.pollWatch(ctx, w.ChildUID())
 	}
 }
@@ -429,16 +419,10 @@ func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, 
 	})
 }
 
-// syncWatches fetches all linked watches and ensures a portal exists for each.
+// syncWatches ensures a portal exists for each child watch stored in metadata.
 func (c *XploraClient) syncWatches(ctx context.Context) {
-	c.log.Info().Str("user_id", c.meta.UserID).Msg("Syncing watches from Xplora API")
-	watches, err := c.gql.GetWatches(ctx, c.meta.UserID)
-	if err != nil {
-		c.log.Warn().Err(err).Msg("Failed to sync watches")
-		return
-	}
-	c.log.Info().Int("count", len(watches)).Msg("Got watches from Xplora API")
-	for _, w := range watches {
+	c.log.Info().Int("count", len(c.meta.Children)).Msg("Syncing watches from metadata")
+	for _, w := range c.meta.Children {
 		c.log.Info().Str("wuid", w.ChildUID()).Str("name", w.ChildName()).Msg("Ensuring portal for watch")
 		c.ensureWatchPortal(ctx, w)
 	}

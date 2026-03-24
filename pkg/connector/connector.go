@@ -143,6 +143,8 @@ type UserLoginMetadata struct {
 	ClientID string `json:"clientId"`
 	// FCMToken is the last registered FCM push token.
 	FCMToken string `json:"fcmToken"`
+	// Children holds the list of child watches from the sign-in response.
+	Children []xplora.WatchInfo `json:"children,omitempty"`
 }
 
 // PortalMetadata stores Xplora-specific data for a bridged Matrix room.
