@@ -313,11 +313,13 @@ func (c *XploraClient) pollLoop(ctx context.Context) {
 
 // pollAllWatches fetches new messages for all linked watches.
 func (c *XploraClient) pollAllWatches(ctx context.Context) {
+	c.log.Debug().Msg("Polling Xplora watches")
 	watches, err := c.gql.GetWatches(ctx, c.meta.UserID)
 	if err != nil {
 		c.log.Warn().Err(err).Msg("Poll: failed to get watches")
 		return
 	}
+	c.log.Debug().Int("count", len(watches)).Msg("Poll: got watches")
 	for _, w := range watches {
 		c.pollWatch(ctx, w.ChildUID())
 	}
@@ -406,12 +408,15 @@ func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, 
 
 // syncWatches fetches all linked watches and ensures a portal exists for each.
 func (c *XploraClient) syncWatches(ctx context.Context) {
+	c.log.Info().Str("user_id", c.meta.UserID).Msg("Syncing watches from Xplora API")
 	watches, err := c.gql.GetWatches(ctx, c.meta.UserID)
 	if err != nil {
 		c.log.Warn().Err(err).Msg("Failed to sync watches")
 		return
 	}
+	c.log.Info().Int("count", len(watches)).Msg("Got watches from Xplora API")
 	for _, w := range watches {
+		c.log.Info().Str("wuid", w.ChildUID()).Str("name", w.ChildName()).Msg("Ensuring portal for watch")
 		c.ensureWatchPortal(ctx, w)
 	}
 }
