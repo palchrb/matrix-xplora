@@ -356,8 +356,17 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		isFromMe := chatMsg.Sender != nil && chatMsg.Sender.ID == c.meta.UserID
 		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
 		c.updateLastMsgID(wuid, chatMsg.MsgID)
-		if icon := extractFCMSenderIcon(msg.Raw); icon != "" {
-			c.updateChildAvatar(wuid, icon)
+		// sender_icon is the SENDER's avatar. Only update the child's avatar when
+		// the child is the sender (child→parent direction). For parent→child messages
+		// sender_icon is the parent's avatar and must not overwrite the child's.
+		if icon := extractFCMSenderIcon(msg.Raw); icon != "" && chatMsg.Sender != nil {
+			for _, w := range c.meta.Children {
+				if w.ChildUID() == wuid &&
+					(chatMsg.Sender.ID == w.ChildUID() || chatMsg.Sender.ID == w.FCMID) {
+					c.updateChildAvatar(wuid, icon)
+					break
+				}
+			}
 		}
 		return
 	}
