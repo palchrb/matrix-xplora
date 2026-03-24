@@ -123,6 +123,15 @@ query ReadMyInfo {
   readMyInfo {
     id
     name
+    children {
+      ward {
+        id
+        name
+        file {
+          id
+        }
+      }
+    }
   }
 }`
 
