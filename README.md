@@ -1,4 +1,4 @@
-# matrix-xplora
+# matrix-xplora  
 
 A Matrix bridge for the [Xplora](https://www.xplora.eu/) children's smartwatch platform, built with [mautrix-go](https://github.com/maunium/mautrix-go).
 
@@ -28,7 +28,7 @@ Bridges the Xplora parent app chat to Matrix, so you can message your child's wa
 
 ```sh
 ./build.sh
-```
+```  
 
 ### 2. Generate config
 
