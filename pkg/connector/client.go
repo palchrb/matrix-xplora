@@ -20,6 +20,13 @@ import (
 	"maunium.net/go/mautrix/event"
 )
 
+// recentSent records a message recently sent from Matrix to Xplora,
+// used to suppress the FCM echo that Xplora sends back to the parent's device.
+type recentSent struct {
+	text   string
+	sentAt time.Time
+}
+
 // XploraClient is the per-login network client.
 // It manages the Xplora GraphQL connection, FCM push notifications,
 // and a polling fallback when FCM is unavailable.
@@ -40,6 +47,11 @@ type XploraClient struct {
 	// Called by Disconnect() so that logout+re-login without restart does not
 	// leave a stale listener competing with the new one.
 	fcmCancel context.CancelFunc
+
+	// recentSentMu guards recentSents. Used to suppress FCM echoes of messages
+	// we just sent from Matrix (Xplora always echoes sends back via FCM).
+	recentSentMu sync.Mutex
+	recentSents  []recentSent
 }
 
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
@@ -320,6 +332,10 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
 			return nil, fmt.Errorf("sendChatText: %w", err)
 		}
+		// Track the sent text so we can suppress the FCM echo Xplora sends back.
+		c.recentSentMu.Lock()
+		c.recentSents = append(c.recentSents, recentSent{text: msg.Content.Body, sentAt: time.Now()})
+		c.recentSentMu.Unlock()
 		// Xplora sendChatText returns a boolean, not a message ID.
 		// Use a synthetic ID based on timestamp for deduplication.
 		syntheticID := fmt.Sprintf("sent-%d", time.Now().UnixMilli())
@@ -385,15 +401,26 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 			}
 		}
 		isFromMe := !isFromChild
-		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
-		c.updateLastMsgID(wuid, chatMsg.MsgID)
-		// sender_icon is the SENDER's avatar. Only update the child's avatar when
-		// the child is the sender (child→parent direction).
-		if isFromChild {
-			if icon := extractFCMSenderIcon(msg.Raw); icon != "" {
-				c.updateChildAvatar(wuid, icon)
+		// Suppress FCM echo: Xplora sends back a push for every message the parent
+		// sends. If this matches a text we just sent from Matrix, skip the dispatch
+		// to prevent duplicates. (Messages sent from the Xplora app won't match any
+		// recent send and will pass through normally.)
+		if isFromMe {
+			text := ""
+			if err := json.Unmarshal(chatMsg.Data, &text); err == nil && c.consumeRecentSent(text) {
+				c.log.Debug().Str("wuid", wuid).Str("msg_id", chatMsg.MsgID).Msg("FCM: suppressing echo of recently sent message")
+				c.updateLastMsgID(wuid, chatMsg.MsgID)
+				return
 			}
 		}
+		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
+		c.updateLastMsgID(wuid, chatMsg.MsgID)
+		// NOTE: We do NOT update the child avatar from FCM sender_icon.
+		// The sender_icon URL format is USER-ICON_{target_device_fcmid}_{sender_file_id},
+		// meaning the user ID in the URL is the RECEIVER's FCM device ID, not the sender's.
+		// For parent→child FCM the URL therefore contains the parent's pic with the child's
+		// FCMID — using it would corrupt the child's stored avatar. The login-derived URL
+		// (USER-ICON_{child_uid}_{child_file_id} from signIn) is the correct source.
 		return
 	}
 
@@ -532,41 +559,29 @@ func fcmMsgTypeToXplora(fcmType string) string {
 	}
 }
 
-// extractFCMSenderIcon returns the sender_icon URL from an Xplora FCM payload.
-// In Xplora pushes, sender_icon is always the child's avatar (the watch user
-// the chat is with), regardless of message direction.
-func extractFCMSenderIcon(raw json.RawMessage) string {
-	var envelope struct {
-		Content *struct {
-			SenderIcon string `json:"sender_icon"`
-		} `json:"content"`
+// consumeRecentSent checks whether text matches a message we recently sent from
+// Matrix and removes it from the tracker. Returns true if an echo was found.
+// The window is 10 seconds; expired entries are pruned on every call.
+func (c *XploraClient) consumeRecentSent(text string) bool {
+	c.recentSentMu.Lock()
+	defer c.recentSentMu.Unlock()
+	now := time.Now()
+	found := false
+	kept := c.recentSents[:0]
+	for _, s := range c.recentSents {
+		if now.Sub(s.sentAt) > 10*time.Second {
+			continue // expired, drop
+		}
+		if !found && s.text == text {
+			found = true
+			continue // consume this entry
+		}
+		kept = append(kept, s)
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
-		return ""
-	}
-	return envelope.Content.SenderIcon
+	c.recentSents = kept
+	return found
 }
 
-// updateChildAvatar stores a new avatar URL for the child identified by wuid,
-// persists it to login metadata, and triggers a portal/ghost resync.
-func (c *XploraClient) updateChildAvatar(wuid, avatarURL string) {
-	idx := -1
-	for i, w := range c.meta.Children {
-		if w.ChildUID() == wuid {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 || c.meta.Children[idx].AvatarURL == avatarURL {
-		return // unknown child or nothing changed
-	}
-	c.meta.Children[idx].AvatarURL = avatarURL
-	ctx := c.userLogin.Log.WithContext(context.Background())
-	c.userLogin.Save(ctx)
-	c.log.Debug().Str("wuid", wuid).Str("url", avatarURL).Msg("Updated child avatar URL")
-	// Re-sync the portal so the room avatar and ghost avatar are refreshed.
-	c.ensureWatchPortal(ctx, c.meta.Children[idx])
-}
 
 // makeURLAvatar builds a bridgev2.Avatar that downloads an image from url.
 func makeURLAvatar(avatarURL string) *bridgev2.Avatar {
