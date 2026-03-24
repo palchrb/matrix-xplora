@@ -329,13 +329,16 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	switch msg.Content.MsgType {
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
-		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
-			return nil, fmt.Errorf("sendChatText: %w", err)
-		}
-		// Track the sent text so we can suppress the FCM echo Xplora sends back.
+		// Record BEFORE sending: Xplora may send the FCM echo before the HTTP
+		// response returns, so we must have the text in recentSents already.
 		c.recentSentMu.Lock()
 		c.recentSents = append(c.recentSents, recentSent{text: msg.Content.Body, sentAt: time.Now()})
 		c.recentSentMu.Unlock()
+		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
+			// Send failed — remove the pre-recorded entry so it doesn't linger.
+			c.consumeRecentSent(msg.Content.Body)
+			return nil, fmt.Errorf("sendChatText: %w", err)
+		}
 		// Xplora sendChatText returns a boolean, not a message ID.
 		// Use a synthetic ID based on timestamp for deduplication.
 		syntheticID := fmt.Sprintf("sent-%d", time.Now().UnixMilli())
