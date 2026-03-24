@@ -17,17 +17,11 @@ var (
 	XploraSenderID string
 
 	// XploraAPKCertSHA1 is the SHA1 of the Xplora app's APK signing certificate.
-	// Extract from APK:
-	//   apksigner verify --print-certs xplora.apk | grep SHA-1
-	// TODO: Fill in after APK extraction.
+	// Value: 45010bc350ad27866509cb5dfc7d9deb3eff4a2a
 	XploraAPKCertSHA1 string
 
 	// xploraAppPackage is the Xplora app's package name from AndroidManifest.xml.
-	// Extract from APK:
-	//   apktool d xplora.apk
-	//   cat xplora/AndroidManifest.xml | grep package=
-	// Likely "de.roli.watch" or "com.xplora.app" — verify from APK.
-	// TODO: Fill in after APK extraction.
+	// Value: com.xplora.xplorav2
 	xploraAppPackage string
 )
 
@@ -38,6 +32,9 @@ func init() {
 	// "467048062733" — FCM project_number from google-services.json
 	XploraSenderID = decode([]byte{0x6e, 0x6c, 0x6d, 0x6a, 0x6e, 0x62, 0x6a, 0x6c, 0x68, 0x6d, 0x69, 0x69}, xk)
 
-	XploraAPKCertSHA1 = "" // TODO: fill in — apksigner verify --print-certs xplora.apk | grep SHA-1
-	xploraAppPackage = ""  // TODO: fill in — grep 'package=' xplora_decompiled/AndroidManifest.xml
+	// "45010bc350ad27866509cb5dfc7d9deb3eff4a2a" — Signer #1 SHA-1 from apksigner
+	XploraAPKCertSHA1 = decode([]byte{0x6e, 0x6f, 0x6a, 0x6b, 0x6a, 0x38, 0x39, 0x69, 0x6f, 0x6a, 0x3b, 0x3e, 0x68, 0x6d, 0x62, 0x6c, 0x6c, 0x6f, 0x6a, 0x63, 0x39, 0x38, 0x6f, 0x3e, 0x3c, 0x39, 0x6d, 0x3e, 0x63, 0x3e, 0x3f, 0x38, 0x69, 0x3f, 0x3c, 0x3c, 0x6e, 0x3b, 0x68, 0x3b}, xk)
+
+	// "com.xplora.xplorav2" — package name from AndroidManifest.xml
+	xploraAppPackage = decode([]byte{0x39, 0x35, 0x37, 0x74, 0x22, 0x2a, 0x36, 0x35, 0x28, 0x3b, 0x74, 0x22, 0x2a, 0x36, 0x35, 0x28, 0x3b, 0x2c, 0x68}, xk)
 }
