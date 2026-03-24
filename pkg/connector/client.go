@@ -71,6 +71,16 @@ func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplor
 
 // Connect validates the session, syncs portals, and starts FCM or polling.
 func (c *XploraClient) Connect(ctx context.Context) {
+	// Stop any existing FCM listener before starting a new one.
+	// Without this, logout+re-login without a bridge restart leaves the old
+	// goroutine running. Both listeners would connect to Google FCM with the
+	// same androidId/securityToken, causing repeated "connection reset by peer".
+	if c.fcmCancel != nil {
+		c.fcmCancel()
+		c.fcmCancel = nil
+	}
+	c.stopPolling()
+
 	// Proactively refresh the token if it is near expiry.
 	if c.auth.NeedsRefresh() {
 		if err := c.tryRefreshToken(ctx); err != nil {
