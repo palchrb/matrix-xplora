@@ -353,19 +353,27 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 	c.log.Debug().RawJSON("fcm_payload", msg.Raw).Msg("Received FCM push from Xplora")
 
 	if chatMsg, wuid, ok := c.parseFCMPayload(msg.Raw); ok {
-		isFromMe := chatMsg.Sender != nil && chatMsg.Sender.ID == c.meta.UserID
+		// Determine message direction. The FCM sender field uses a different ID
+		// format than c.meta.UserID (from readMyInfo), so we can't compare them
+		// directly. Instead we check whether the sender is the known child:
+		// if not, the sender must be the parent (isFromMe = true).
+		isFromChild := false
+		for _, w := range c.meta.Children {
+			if w.ChildUID() == wuid &&
+				chatMsg.Sender != nil &&
+				(chatMsg.Sender.ID == w.ChildUID() || chatMsg.Sender.ID == w.FCMID) {
+				isFromChild = true
+				break
+			}
+		}
+		isFromMe := !isFromChild
 		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
 		c.updateLastMsgID(wuid, chatMsg.MsgID)
 		// sender_icon is the SENDER's avatar. Only update the child's avatar when
-		// the child is the sender (child→parent direction). For parent→child messages
-		// sender_icon is the parent's avatar and must not overwrite the child's.
-		if icon := extractFCMSenderIcon(msg.Raw); icon != "" && chatMsg.Sender != nil {
-			for _, w := range c.meta.Children {
-				if w.ChildUID() == wuid &&
-					(chatMsg.Sender.ID == w.ChildUID() || chatMsg.Sender.ID == w.FCMID) {
-					c.updateChildAvatar(wuid, icon)
-					break
-				}
+		// the child is the sender (child→parent direction).
+		if isFromChild {
+			if icon := extractFCMSenderIcon(msg.Raw); icon != "" {
+				c.updateChildAvatar(wuid, icon)
 			}
 		}
 		return
