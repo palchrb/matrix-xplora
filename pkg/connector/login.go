@@ -112,14 +112,8 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 				Name: &name,
 				User: c.Ward,
 			}
-			// Construct the avatar URL from the profile picture file ID returned
-			// by the sign-in API. The Xplora CDN pattern is:
-			//   fetch_icon?p=USER-ICON_{user_id}_{file_id}
 			if c.Ward.File != nil && c.Ward.File.ID != "" {
-				w.AvatarURL = fmt.Sprintf(
-					"https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_%s_%s",
-					c.Ward.ID, c.Ward.File.ID,
-				)
+				w.AvatarURL = "https://api.myxplora.com/file?id=" + c.Ward.File.ID
 			}
 			children = append(children, w)
 		}
