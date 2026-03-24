@@ -129,15 +129,22 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			Msg("Known child at connect")
 	}
 
+	// Create the FCM client early so we can load any cached credentials from
+	// disk before syncWatches runs. AccountID() uses the stored Android device
+	// ID to build correct fetch_icon avatar URLs. On first boot (no credentials
+	// yet) AccountID() returns "" and rebuildChildAvatarURLs is a no-op; the
+	// avatar gets corrected after Register() succeeds below.
+	sessDir := c.connector.sessionDir(c.userLogin.ID)
+	c.fcmClient = fcm.NewClient(sessDir)
+	if parentFCMID := c.fcmClient.AccountID(); parentFCMID != "" {
+		c.rebuildChildAvatarURLs(ctx, parentFCMID)
+	}
+
 	// Sync portals (one per child watch) on every connect.
 	go c.syncWatches(ctx)
 
 	// Keep the space room avatar in sync with the bot's configured avatar.
 	go c.ensureSpaceAvatar(ctx)
-
-	// Try FCM. Fall back to polling on any failure.
-	sessDir := c.connector.sessionDir(c.userLogin.ID)
-	c.fcmClient = fcm.NewClient(sessDir)
 
 	c.fcmClient.OnMessage(func(msg fcm.NewMessage) {
 		c.handleFCMMessage(msg)
@@ -184,6 +191,16 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		}
 	}
 	c.meta.FCMToken = fcmToken
+
+	// On first boot AccountID() was empty above; now credentials exist. If
+	// avatar URLs still use the wrong ward-UID format, rebuild them and kick
+	// off another portal sync so Matrix rooms get the correct avatar.
+	if parentFCMID := c.fcmClient.AccountID(); parentFCMID != "" {
+		if c.rebuildChildAvatarURLs(ctx, parentFCMID) {
+			go c.syncWatches(ctx)
+		}
+	}
+
 	c.userLogin.Save(ctx)
 
 	c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
@@ -401,7 +418,7 @@ func (c *XploraClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev
 func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 	c.log.Debug().RawJSON("fcm_payload", msg.Raw).Msg("Received FCM push from Xplora")
 
-	if chatMsg, wuid, ok := c.parseFCMPayload(msg.Raw); ok {
+	if chatMsg, wuid, senderIcon, ok := c.parseFCMPayload(msg.Raw); ok {
 		// Determine message direction. The FCM sender field uses a different ID
 		// format than c.meta.UserID (from readMyInfo), so we can't compare them
 		// directly. Instead we check whether the sender is the known child:
@@ -430,12 +447,31 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		}
 		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
 		c.updateLastMsgID(wuid, chatMsg.MsgID)
-		// NOTE: We do NOT update the child avatar from FCM sender_icon.
-		// The sender_icon URL format is USER-ICON_{target_device_fcmid}_{sender_file_id},
-		// meaning the user ID in the URL is the RECEIVER's FCM device ID, not the sender's.
-		// For parent→child FCM the URL therefore contains the parent's pic with the child's
-		// FCMID — using it would corrupt the child's stored avatar. The login-derived URL
-		// (USER-ICON_{child_uid}_{child_file_id} from signIn) is the correct source.
+		// When a message arrives FROM the child, sender_icon carries the child's
+		// current profile picture. The URL format is:
+		//   USER-ICON_{receiver_fcmid}_{sender_file_id}
+		// where receiver_fcmid is our (parent's) FCM Android account ID — a known
+		// valid value on the Xplora CDN. We use this to lazily keep the child's
+		// ghost user avatar up-to-date, including fixing the initial broken URL
+		// (which used the GQL ward ID instead of the FCM account ID).
+		// For parent→child messages isFromChild is false, so we skip those (they
+		// would carry the parent's own picture, not the child's).
+		if isFromChild && senderIcon != "" {
+			ctx := c.userLogin.Log.WithContext(context.Background())
+			for i, w := range c.meta.Children {
+				if w.ChildUID() == wuid && senderIcon != w.AvatarURL {
+					c.log.Debug().
+						Str("wuid", wuid).
+						Str("old_url", w.AvatarURL).
+						Str("new_url", senderIcon).
+						Msg("Updating child avatar from FCM sender_icon")
+					c.meta.Children[i].AvatarURL = senderIcon
+					c.userLogin.Save(ctx)
+					go c.ensureWatchPortal(ctx, c.meta.Children[i])
+					break
+				}
+			}
+		}
 		return
 	}
 
@@ -445,25 +481,27 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 }
 
 // parseFCMPayload parses an Xplora FCM push notification payload.
-// Returns the synthetic ChatMessage, the target watch UID, and true on success.
-// The wuid is determined by matching sender/receiver against known children.
-func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, bool) {
+// Returns the synthetic ChatMessage, the target watch UID, the sender_icon URL,
+// and true on success. The wuid is determined by matching sender/receiver against
+// known children.
+func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, string, bool) {
 	var envelope struct {
 		Content *struct {
-			MsgID    int64  `json:"msg_id"`
-			MsgType  string `json:"msg_type"`
-			Receiver string `json:"receiver"`
-			Sender   string `json:"sender"`
-			Text     string `json:"text"`
-			Time     int64  `json:"time"`
+			MsgID      int64  `json:"msg_id"`
+			MsgType    string `json:"msg_type"`
+			Receiver   string `json:"receiver"`
+			Sender     string `json:"sender"`
+			SenderIcon string `json:"sender_icon"`
+			Text       string `json:"text"`
+			Time       int64  `json:"time"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", "", false
 	}
 	ct := envelope.Content
 	if ct.MsgID == 0 || ct.MsgType == "" {
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", "", false
 	}
 
 	// Emoticon FCM payloads may or may not include emoticon_id.
@@ -478,7 +516,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			rawContent = envelope2.Content
 		}
 		c.log.Debug().RawJSON("fcm_emoticon_content", rawContent).Msg("FCM chat_emoticon payload (falling back to poll)")
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", "", false
 	}
 
 	// Identify the watch UID: the child's ID is either the receiver
@@ -519,7 +557,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Str("receiver", ct.Receiver).
 			Strs("known_child_uids", knownUIDs).
 			Msg("FCM direct parse: could not match sender/receiver to a known child")
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", "", false
 	}
 	// Learn the child's FCM user ID if we don't have it yet.
 	// In a parent→child message the receiver IS the child's FCM account ID.
@@ -563,7 +601,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		Sender: senderRef,
 		Data:   dataJSON,
 		Create: &createSec,
-	}, wuid, true
+	}, wuid, ct.SenderIcon, true
 }
 
 // fcmMsgTypeToXplora maps an FCM msg_type value to the Xplora API type label
@@ -857,6 +895,42 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 	if added > 0 {
 		c.userLogin.Save(ctx)
 	}
+}
+
+// rebuildChildAvatarURLs corrects any child AvatarURL that was built with the
+// ward's GQL user ID (e.g. "01110e065d185f5f...") instead of the parent's FCM
+// Android account ID (e.g. "b25c80b44f234db3"). The Xplora fetch_icon CDN
+// requires the FCM account ID; using the GQL ward ID returns HTTP 500.
+//
+// Returns true if any URL was updated (caller may want to re-sync portals).
+func (c *XploraClient) rebuildChildAvatarURLs(ctx context.Context, parentFCMID string) bool {
+	changed := false
+	for i, w := range c.meta.Children {
+		fileID := ""
+		if w.User != nil && w.User.File != nil {
+			fileID = w.User.File.ID
+		}
+		if fileID == "" {
+			continue
+		}
+		correct := fmt.Sprintf(
+			"https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_%s_%s",
+			parentFCMID, fileID,
+		)
+		if correct != c.meta.Children[i].AvatarURL {
+			c.log.Debug().
+				Str("wuid", w.ChildUID()).
+				Str("old_url", c.meta.Children[i].AvatarURL).
+				Str("new_url", correct).
+				Msg("Rebuilt child avatar URL with FCM account ID")
+			c.meta.Children[i].AvatarURL = correct
+			changed = true
+		}
+	}
+	if changed {
+		c.userLogin.Save(ctx)
+	}
+	return changed
 }
 
 // ensureWatchPortal creates or updates the portal for a child's watch.
