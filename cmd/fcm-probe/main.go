@@ -100,7 +100,7 @@ func cmdRegister(args []string) {
 	})
 	gqlClient := xplora.NewClient(auth)
 
-	if err := gqlClient.SetFCMToken(ctx, *uid, *clientID, fcmToken); err != nil {
+	if err := gqlClient.SetFCMToken(ctx, *clientID, fcmToken); err != nil {
 		fmt.Fprintf(os.Stderr, "setFCMToken failed: %v\n", err)
 		os.Exit(1)
 	}

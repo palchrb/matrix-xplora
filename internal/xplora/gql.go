@@ -5,17 +5,21 @@ package xplora
 const (
 	MutationSignIn = `
 mutation signInWithEmailOrPhone(
-  $countryCode: String
-  $phoneNumber: String!
+  $countryPhoneNumber: String
+  $phoneNumber: String
   $password: String!
-  $userAgent: String
-  $timeZone: String
+  $emailAddress: String
+  $client: ClientType!
+  $userLang: String!
+  $timeZone: String!
 ) {
   signInWithEmailOrPhone(
-    countryCode: $countryCode
+    countryPhoneNumber: $countryPhoneNumber
     phoneNumber: $phoneNumber
     password: $password
-    userAgent: $userAgent
+    emailAddress: $emailAddress
+    client: $client
+    userLang: $userLang
     timeZone: $timeZone
   ) {
     id
@@ -24,33 +28,49 @@ mutation signInWithEmailOrPhone(
     expireDate
     user {
       id
-      username
+    }
+    w360 {
+      token
+      secret
     }
   }
 }`
 
+	MutationRefreshToken = `
+mutation RefreshToken($uid: String!, $refreshToken: String!) {
+  refreshToken(uid: $uid, refreshToken: $refreshToken) {
+    id
+    token
+    refreshToken
+    expireDate
+    valid
+  }
+}`
+
+	// MutationSetFCMToken registers an FCM token with the Xplora backend.
+	// terminalType and isAndroid are hardcoded in the mutation body as per pyxplora_api.
 	MutationSetFCMToken = `
 mutation setFCMToken(
-  $uid: String!
-  $key: String!
   $clientId: String!
-  $deviceName: String
-  $deviceOs: String
-  $deviceOsVer: String
-  $deviceBrand: String
-  $deviceModel: String
-  $type: Int
+  $fcmToken: String!
+  $manufacturer: String
+  $brand: String
+  $model: String
+  $osVer: String
+  $userLang: String!
+  $timeZone: String
 ) {
   setFCMToken(
-    uid: $uid
-    key: $key
     clientId: $clientId
-    deviceName: $deviceName
-    deviceOs: $deviceOs
-    deviceOsVer: $deviceOsVer
-    deviceBrand: $deviceBrand
-    deviceModel: $deviceModel
-    type: $type
+    fcmToken: $fcmToken
+    terminalType: ANDROID
+    manufacturer: $manufacturer
+    brand: $brand
+    model: $model
+    osVer: $osVer
+    userLang: $userLang
+    timeZone: $timeZone
+    isAndroid: true
   )
 }`
 
@@ -59,31 +79,47 @@ mutation SendChatText($uid: String!, $text: String!) {
   sendChatText(uid: $uid, text: $text)
 }`
 
+	// MutationSetReadChatMsg marks a chat message as read.
+	// Note: the API field is setReadChatMsg (no trailing M).
 	MutationSetReadChatMsg = `
-mutation SetReadChatMsg($uid: String!, $msgId: String!) {
-  setReadChatMsgM(uid: $uid, msgId: $msgId)
+mutation SetReadChatMsg($uid: String!, $msgId: String, $id: String) {
+  setReadChatMsg(uid: $uid, msgId: $msgId, id: $id)
 }`
 
+	// QueryChats fetches paginated messages for a watch.
+	// data is a JSON blob containing type-specific message content.
+	// create is the Unix timestamp (milliseconds).
+	// sender.id identifies who sent the message (child vs parent).
+	// $msgId optionally filters to messages after a given ID.
 	QueryChats = `
-query Chats($uid: String!, $offset: Int, $limit: Int) {
-  chatsNew(uid: $uid, offset: $offset, limit: $limit) {
+query Chats($uid: String!, $offset: Int, $limit: Int, $msgId: String) {
+  chatsNew(uid: $uid, offset: $offset, limit: $limit, msgId: $msgId) {
     offset
     limit
     list {
+      id
       msgId
       type
-      text
-      tm
-      status
+      sender {
+        id
+      }
+      data
+      create
     }
   }
 }`
 
+	// QueryWatches returns all child watches linked to a parent account.
+	// user.id is the child's user ID used as the UID for chatsNew.
 	QueryWatches = `
 query Watches($uid: String) {
   watches(uid: $uid) {
-    uid
+    id
     name
+    user {
+      id
+      name
+    }
   }
 }`
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Credentials is the on-disk credential store for a single Xplora login.
@@ -13,7 +14,7 @@ import (
 type Credentials struct {
 	Token        string `json:"token"`
 	RefreshToken string `json:"refreshToken"`
-	ExpireDate   string `json:"expireDate"`
+	ExpireDate   string `json:"expireDate"` // ISO8601, e.g. "2026-03-25T10:00:00Z"
 	UserID       string `json:"userId"`
 }
 
@@ -76,6 +77,31 @@ func (a *Auth) UserID() string {
 		return ""
 	}
 	return a.creds.UserID
+}
+
+// RefreshToken returns the stored refresh token (or empty string if not set).
+func (a *Auth) RefreshToken() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.creds == nil {
+		return ""
+	}
+	return a.creds.RefreshToken
+}
+
+// NeedsRefresh returns true if the token is expired or will expire within 5 minutes.
+// Returns false if the expiry date cannot be parsed (assume still valid).
+func (a *Auth) NeedsRefresh() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.creds == nil || a.creds.ExpireDate == "" {
+		return false
+	}
+	expiry, err := time.Parse(time.RFC3339, a.creds.ExpireDate)
+	if err != nil {
+		return false
+	}
+	return time.Until(expiry) < 5*time.Minute
 }
 
 // SetCredentials stores new credentials in memory and saves them to disk.
