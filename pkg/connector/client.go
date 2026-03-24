@@ -465,9 +465,18 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		return xplora.ChatMessage{}, "", false
 	}
 
-	// Emoticon FCM payloads don't include the emoticon_id; the full data is only
-	// available via chatsNew. Returning false triggers a poll which fetches it.
+	// Emoticon FCM payloads may or may not include emoticon_id.
+	// Log the full raw content so we can inspect what fields are present,
+	// then fall back to polling which fetches the full data via chatsNew.
 	if ct.MsgType == "chat_emoticon" {
+		var rawContent json.RawMessage
+		var envelope2 struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(raw, &envelope2); err == nil {
+			rawContent = envelope2.Content
+		}
+		c.log.Debug().RawJSON("fcm_emoticon_content", rawContent).Msg("FCM chat_emoticon payload (falling back to poll)")
 		return xplora.ChatMessage{}, "", false
 	}
 
