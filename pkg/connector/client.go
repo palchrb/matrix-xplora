@@ -486,7 +486,7 @@ func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
 	creds := &xplora.Credentials{
 		Token:        resp.Token,
 		RefreshToken: resp.RefreshToken,
-		ExpireDate:   resp.ExpireDate,
+		ExpireDate:   string(resp.ExpireDate),
 		UserID:       uid,
 	}
 	if err := c.auth.SetCredentials(creds); err != nil {
