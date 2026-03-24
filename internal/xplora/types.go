@@ -75,10 +75,12 @@ type RefreshTokenResponse struct {
 
 // WatchInfo represents a child's smartwatch linked to the parent account.
 // ID is the watch device ID. User.ID is the child's user ID used for chatsNew.
+// AvatarURL is updated from FCM sender_icon pushes and persisted in login metadata.
 type WatchInfo struct {
-	ID   string   `json:"id"`
-	Name *string  `json:"name"`
-	User *UserRef `json:"user"`
+	ID        string   `json:"id"`
+	Name      *string  `json:"name"`
+	User      *UserRef `json:"user"`
+	AvatarURL string   `json:"avatarUrl,omitempty"`
 }
 
 // ChildUID returns the child's user ID for use in chatsNew queries.

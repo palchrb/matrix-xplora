@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -244,7 +246,11 @@ func (c *XploraClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*b
 	wuid := string(ghost.ID)
 	for _, w := range c.meta.Children {
 		if w.ChildUID() == wuid {
-			return &bridgev2.UserInfo{Name: ptrStr(w.ChildName())}, nil
+			info := &bridgev2.UserInfo{Name: ptrStr(w.ChildName())}
+			if w.AvatarURL != "" {
+				info.Avatar = makeURLAvatar(w.AvatarURL)
+			}
+			return info, nil
 		}
 	}
 	return &bridgev2.UserInfo{Name: ptrStr(wuid)}, nil
@@ -314,6 +320,9 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		isFromMe := chatMsg.Sender != nil && chatMsg.Sender.ID == c.meta.UserID
 		c.dispatchChatMessage(wuid, chatMsg, isFromMe)
 		c.updateLastMsgID(wuid, chatMsg.MsgID)
+		if icon := extractFCMSenderIcon(msg.Raw); icon != "" {
+			c.updateChildAvatar(wuid, icon)
+		}
 		return
 	}
 
@@ -403,6 +412,61 @@ func fcmMsgTypeToXplora(fcmType string) string {
 		return "EMOTICON"
 	default:
 		return fcmType
+	}
+}
+
+// extractFCMSenderIcon returns the sender_icon URL from an Xplora FCM payload.
+// In Xplora pushes, sender_icon is always the child's avatar (the watch user
+// the chat is with), regardless of message direction.
+func extractFCMSenderIcon(raw json.RawMessage) string {
+	var envelope struct {
+		Content *struct {
+			SenderIcon string `json:"sender_icon"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
+		return ""
+	}
+	return envelope.Content.SenderIcon
+}
+
+// updateChildAvatar stores a new avatar URL for the child identified by wuid,
+// persists it to login metadata, and triggers a portal/ghost resync.
+func (c *XploraClient) updateChildAvatar(wuid, avatarURL string) {
+	idx := -1
+	for i, w := range c.meta.Children {
+		if w.ChildUID() == wuid {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || c.meta.Children[idx].AvatarURL == avatarURL {
+		return // unknown child or nothing changed
+	}
+	c.meta.Children[idx].AvatarURL = avatarURL
+	ctx := c.userLogin.Log.WithContext(context.Background())
+	c.userLogin.Save(ctx)
+	c.log.Debug().Str("wuid", wuid).Str("url", avatarURL).Msg("Updated child avatar URL")
+	// Re-sync the portal so the room avatar and ghost avatar are refreshed.
+	c.ensureWatchPortal(ctx, c.meta.Children[idx])
+}
+
+// makeURLAvatar builds a bridgev2.Avatar that downloads an image from url.
+func makeURLAvatar(avatarURL string) *bridgev2.Avatar {
+	return &bridgev2.Avatar{
+		ID: networkid.AvatarID(avatarURL),
+		Get: func(ctx context.Context) ([]byte, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, avatarURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			return io.ReadAll(resp.Body)
+		},
 	}
 }
 
@@ -579,6 +643,7 @@ func (c *XploraClient) syncWatches(ctx context.Context) {
 func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo) {
 	wuid := w.ChildUID()
 	childName := w.ChildName()
+	avatarURL := w.AvatarURL
 	portalKey := networkid.PortalKey{
 		ID:       portalIDFromWUID(wuid),
 		Receiver: c.userLogin.ID,
@@ -602,7 +667,7 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 				},
 			}
 			name := childName
-			return &bridgev2.ChatInfo{
+			info := &bridgev2.ChatInfo{
 				Name:    &name,
 				Members: &bridgev2.ChatMemberList{IsFull: true, Members: members},
 				ExtraUpdates: func(_ context.Context, portal *bridgev2.Portal) bool {
@@ -622,7 +687,11 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 					}
 					return changed
 				},
-			}, nil
+			}
+			if avatarURL != "" {
+				info.Avatar = makeURLAvatar(avatarURL)
+			}
+			return info, nil
 		},
 	})
 }
