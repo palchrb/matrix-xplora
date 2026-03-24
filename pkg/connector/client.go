@@ -117,6 +117,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			name = *myInfo.Name
 		}
 		c.log.Debug().Str("my_info_id", myInfo.ID).Str("my_info_name", name).Msg("GetMyInfo result (parent user ID format)")
+		c.mergeChildren(ctx, myInfo.Children)
 	}
 	for _, w := range c.meta.Children {
 		c.log.Debug().
@@ -800,6 +801,47 @@ func (c *XploraClient) syncWatches(ctx context.Context) {
 			Str("avatar_url", w.AvatarURL).
 			Msg("Ensuring portal for watch")
 		c.ensureWatchPortal(ctx, w)
+	}
+}
+
+// mergeChildren updates meta.Children with any new children returned by the
+// readMyInfo API. Existing entries are kept intact (preserving FCMID, AvatarURL).
+// New children are appended and the login metadata is persisted so that bridge
+// restarts pick up any watches added to the account since the last sign-in.
+func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEntry) {
+	added := 0
+	for _, entry := range fresh {
+		if entry.Ward == nil || entry.Ward.ID == "" {
+			continue
+		}
+		known := false
+		for _, existing := range c.meta.Children {
+			if existing.ChildUID() == entry.Ward.ID || existing.ID == entry.Ward.ID {
+				known = true
+				break
+			}
+		}
+		if known {
+			continue
+		}
+		name := entry.Ward.Name
+		w := xplora.WatchInfo{
+			ID:   entry.Ward.ID,
+			Name: &name,
+			User: entry.Ward,
+		}
+		if entry.Ward.File != nil && entry.Ward.File.ID != "" {
+			w.AvatarURL = fmt.Sprintf(
+				"https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_%s_%s",
+				entry.Ward.ID, entry.Ward.File.ID,
+			)
+		}
+		c.meta.Children = append(c.meta.Children, w)
+		added++
+		c.log.Info().Str("child_uid", w.ChildUID()).Str("name", w.ChildName()).Msg("New child detected at connect, added to metadata")
+	}
+	if added > 0 {
+		c.userLogin.Save(ctx)
 	}
 }
 

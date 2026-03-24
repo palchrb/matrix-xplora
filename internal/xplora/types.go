@@ -114,8 +114,9 @@ func (w WatchInfo) ChildName() string {
 
 // UserInfo is returned by the readMyInfo query.
 type UserInfo struct {
-	ID   string  `json:"id"`
-	Name *string `json:"name"`
+	ID       string       `json:"id"`
+	Name     *string      `json:"name"`
+	Children []ChildEntry `json:"children"`
 }
 
 // ChatMessage is a single message from the chatsNew query.
