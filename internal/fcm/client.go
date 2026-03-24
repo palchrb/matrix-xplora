@@ -123,6 +123,27 @@ func (c *Client) Token() string {
 	return c.credentials.Token
 }
 
+// AccountID returns the GCM Android device ID as a 16-character lowercase hex
+// string (e.g. "b25c80b44f234db3"). This is the "user ID" embedded in Xplora
+// fetch_icon avatar URLs: USER-ICON_{AccountID}_{file_id}.
+// Loads credentials from disk if not already in memory.
+// Returns empty string if credentials are unavailable.
+func (c *Client) AccountID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.credentials == nil {
+		_ = c.loadCredentials() // best-effort; ignore error
+	}
+	if c.credentials == nil {
+		return ""
+	}
+	var gcmCreds gcmCredentials
+	if err := json.Unmarshal(c.credentials.Raw, &gcmCreds); err != nil || gcmCreds.AndroidID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%016x", gcmCreds.AndroidID)
+}
+
 // Credentials returns a copy of the current FCM credentials (nil if not registered).
 func (c *Client) Credentials() *Credentials {
 	c.mu.Lock()
