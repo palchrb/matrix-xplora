@@ -53,8 +53,14 @@ type ChildEntry struct {
 
 // UserRef is a brief user reference embedded in ChildEntry and ChatMessage.
 type UserRef struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string   `json:"id"`
+	Name string   `json:"name"`
+	File *FileRef `json:"file,omitempty"`
+}
+
+// FileRef holds the ID of a user's profile picture as returned by the Xplora API.
+type FileRef struct {
+	ID string `json:"id"`
 }
 
 // W360 holds an alternative token/secret pair returned by signIn.
