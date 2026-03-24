@@ -130,15 +130,10 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 
 	// Create the FCM client early so we can load any cached credentials from
-	// disk before syncWatches runs. AccountID() uses the stored Android device
-	// ID to build correct fetch_icon avatar URLs. On first boot (no credentials
-	// yet) AccountID() returns "" and rebuildChildAvatarURLs is a no-op; the
-	// avatar gets corrected after Register() succeeds below.
+	// disk before syncWatches runs.
 	sessDir := c.connector.sessionDir(c.userLogin.ID)
 	c.fcmClient = fcm.NewClient(sessDir)
-	if parentFCMID := c.fcmClient.AccountID(); parentFCMID != "" {
-		c.rebuildChildAvatarURLs(ctx, parentFCMID)
-	}
+	c.rebuildChildAvatarURLs(ctx)
 
 	// Sync portals (one per child watch) on every connect.
 	go c.syncWatches(ctx)
@@ -192,13 +187,10 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 	c.meta.FCMToken = fcmToken
 
-	// On first boot AccountID() was empty above; now credentials exist. If
-	// avatar URLs still use the wrong ward-UID format, rebuild them and kick
-	// off another portal sync so Matrix rooms get the correct avatar.
-	if parentFCMID := c.fcmClient.AccountID(); parentFCMID != "" {
-		if c.rebuildChildAvatarURLs(ctx, parentFCMID) {
-			go c.syncWatches(ctx)
-		}
+	// After registration, FCMID for children may now be learnable. Rebuild
+	// avatar URLs in case they were missing FCMID before, and re-sync portals.
+	if c.rebuildChildAvatarURLs(ctx) {
+		go c.syncWatches(ctx)
 	}
 
 	c.userLogin.Save(ctx)
@@ -449,11 +441,10 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		c.updateLastMsgID(wuid, chatMsg.MsgID)
 		// When a message arrives FROM the child, sender_icon carries the child's
 		// current profile picture. The URL format is:
-		//   USER-ICON_{receiver_fcmid}_{sender_file_id}
-		// where receiver_fcmid is our (parent's) FCM Android account ID — a known
-		// valid value on the Xplora CDN. We use this to lazily keep the child's
-		// ghost user avatar up-to-date, including fixing the initial broken URL
-		// (which used the GQL ward ID instead of the FCM account ID).
+		//   USER-ICON_{sender_fcmid}_{sender_file_id}
+		// where sender_fcmid is the child's own FCM account ID. We use this to
+		// lazily keep the child's ghost user avatar up-to-date, including fixing
+		// the initial broken URL (which used the GQL ward ID instead).
 		// For parent→child messages isFromChild is false, so we skip those (they
 		// would carry the parent's own picture, not the child's).
 		if isFromChild && senderIcon != "" {
@@ -898,14 +889,21 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 }
 
 // rebuildChildAvatarURLs corrects any child AvatarURL that was built with the
-// ward's GQL user ID (e.g. "01110e065d185f5f...") instead of the parent's FCM
-// Android account ID (e.g. "b25c80b44f234db3"). The Xplora fetch_icon CDN
-// requires the FCM account ID; using the GQL ward ID returns HTTP 500.
+// ward's GQL user ID (e.g. "01110e065d185f5f...") instead of the child's own
+// FCM account ID (e.g. "b25c80b44f234db3"). The Xplora fetch_icon CDN URL
+// format is USER-ICON_{child_fcmid}_{file_id}; using the GQL ward ID or the
+// parent's device ID returns HTTP 500.
+//
+// Only children whose FCMID is already known can be corrected here; the rest
+// will be fixed lazily when the first FCM message arrives (sender_icon).
 //
 // Returns true if any URL was updated (caller may want to re-sync portals).
-func (c *XploraClient) rebuildChildAvatarURLs(ctx context.Context, parentFCMID string) bool {
+func (c *XploraClient) rebuildChildAvatarURLs(ctx context.Context) bool {
 	changed := false
 	for i, w := range c.meta.Children {
+		if w.FCMID == "" {
+			continue
+		}
 		fileID := ""
 		if w.User != nil && w.User.File != nil {
 			fileID = w.User.File.ID
@@ -915,14 +913,14 @@ func (c *XploraClient) rebuildChildAvatarURLs(ctx context.Context, parentFCMID s
 		}
 		correct := fmt.Sprintf(
 			"https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_%s_%s",
-			parentFCMID, fileID,
+			w.FCMID, fileID,
 		)
 		if correct != c.meta.Children[i].AvatarURL {
 			c.log.Debug().
 				Str("wuid", w.ChildUID()).
 				Str("old_url", c.meta.Children[i].AvatarURL).
 				Str("new_url", correct).
-				Msg("Rebuilt child avatar URL with FCM account ID")
+				Msg("Rebuilt child avatar URL with child FCM ID")
 			c.meta.Children[i].AvatarURL = correct
 			changed = true
 		}
