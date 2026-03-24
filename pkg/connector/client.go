@@ -35,6 +35,11 @@ type XploraClient struct {
 	// pollCancel cancels the polling goroutine when FCM is connected.
 	pollCancel context.CancelFunc
 	pollMu     sync.Mutex
+
+	// fcmCancel cancels the FCM listener goroutine started in Connect().
+	// Called by Disconnect() so that logout+re-login without restart does not
+	// leave a stale listener competing with the new one.
+	fcmCancel context.CancelFunc
 }
 
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
@@ -141,15 +146,21 @@ func (c *XploraClient) Connect(ctx context.Context) {
 
 	c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 
+	// Create a cancellable context for the FCM listener so Disconnect() can
+	// stop it cleanly without affecting the caller's context.
+	fcmCtx, fcmCancel := context.WithCancel(context.Background())
+	c.fcmCancel = fcmCancel
+
 	// Start FCM listener in background with exponential backoff.
 	go func() {
+		defer fcmCancel()
 		backoff := 5 * time.Second
 		const maxBackoff = 5 * time.Minute
-		for ctx.Err() == nil {
-			if err := c.fcmClient.Listen(ctx); err != nil && ctx.Err() == nil {
+		for fcmCtx.Err() == nil {
+			if err := c.fcmClient.Listen(fcmCtx); err != nil && fcmCtx.Err() == nil {
 				c.log.Warn().Err(err).Dur("retry_in", backoff).Msg("FCM Listen returned error, retrying")
 				select {
-				case <-ctx.Done():
+				case <-fcmCtx.Done():
 					return
 				case <-time.After(backoff):
 				}
@@ -165,9 +176,14 @@ func (c *XploraClient) Connect(ctx context.Context) {
 }
 
 // Disconnect stops background goroutines cleanly.
+// Must cancel the FCM listener explicitly — its context is not the caller's
+// context, so it would otherwise outlive the login and race with any new
+// connection started by a subsequent re-login without a bridge restart.
 func (c *XploraClient) Disconnect() {
 	c.stopPolling()
-	// FCM client stops when the context passed to Listen() is cancelled.
+	if c.fcmCancel != nil {
+		c.fcmCancel()
+	}
 }
 
 // ensureSpaceAvatar updates the space room's m.room.avatar to match the
@@ -381,9 +397,14 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		}
 	}
 	if wuid == "" {
+		knownUIDs := make([]string, 0, len(c.meta.Children))
+		for _, w := range c.meta.Children {
+			knownUIDs = append(knownUIDs, w.ChildUID())
+		}
 		c.log.Debug().
 			Str("sender", ct.Sender).
 			Str("receiver", ct.Receiver).
+			Strs("known_child_uids", knownUIDs).
 			Msg("FCM direct parse: could not match sender/receiver to a known child")
 		return xplora.ChatMessage{}, "", false
 	}
@@ -651,7 +672,11 @@ func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, 
 func (c *XploraClient) syncWatches(ctx context.Context) {
 	c.log.Info().Int("count", len(c.meta.Children)).Msg("Syncing watches from metadata")
 	for _, w := range c.meta.Children {
-		c.log.Info().Str("wuid", w.ChildUID()).Str("name", w.ChildName()).Msg("Ensuring portal for watch")
+		c.log.Info().
+			Str("wuid", w.ChildUID()).
+			Str("name", w.ChildName()).
+			Str("avatar_url", w.AvatarURL).
+			Msg("Ensuring portal for watch")
 		c.ensureWatchPortal(ctx, w)
 	}
 }
