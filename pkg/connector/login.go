@@ -30,13 +30,13 @@ func (xl *XploraLogin) Start(_ context.Context) (*bridgev2.LoginStep, error) {
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
-					Type:    bridgev2.LoginInputFieldTypePhoneNumber,
+					Type:    bridgev2.LoginInputFieldTypeUsername,
 					ID:      "country_code",
 					Name:    "Country code (digits only, e.g. 47 for Norway)",
 					Pattern: `^\d{1,4}$`,
 				},
 				{
-					Type:    bridgev2.LoginInputFieldTypePhoneNumber,
+					Type:    bridgev2.LoginInputFieldTypeUsername,
 					ID:      "phone",
 					Name:    "Phone number (without country code)",
 					Pattern: `^\d{5,15}$`,
