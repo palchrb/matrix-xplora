@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,6 +134,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	// disk before syncWatches runs.
 	sessDir := c.connector.sessionDir(c.userLogin.ID)
 	c.fcmClient = fcm.NewClient(sessDir)
+	c.migrateChildAvatarURLs(ctx)
 
 	// Sync portals (one per child watch) on every connect.
 	go c.syncWatches(ctx)
@@ -848,6 +850,36 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 		c.log.Info().Str("child_uid", w.ChildUID()).Str("name", w.ChildName()).Msg("New child detected at connect, added to metadata")
 	}
 	if added > 0 {
+		c.userLogin.Save(ctx)
+	}
+}
+
+// migrateChildAvatarURLs converts any legacy fetch_icon URLs stored in metadata
+// to the new api.myxplora.com/file?id= format. The old URL pattern was:
+//   https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_{id}_{fileID}
+// The file ID is the last underscore-delimited segment.
+func (c *XploraClient) migrateChildAvatarURLs(ctx context.Context) {
+	changed := false
+	for i, w := range c.meta.Children {
+		if !strings.Contains(w.AvatarURL, "fetch_icon") {
+			continue
+		}
+		// Extract file ID: last segment after the final '_'
+		p := w.AvatarURL[strings.LastIndex(w.AvatarURL, "USER-ICON_")+len("USER-ICON_"):]
+		parts := strings.SplitN(p, "_", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			continue
+		}
+		newURL := "https://api.myxplora.com/file?id=" + parts[1]
+		c.log.Info().
+			Str("wuid", w.ChildUID()).
+			Str("old_url", w.AvatarURL).
+			Str("new_url", newURL).
+			Msg("Migrated child avatar URL to api.myxplora.com")
+		c.meta.Children[i].AvatarURL = newURL
+		changed = true
+	}
+	if changed {
 		c.userLogin.Save(ctx)
 	}
 }
