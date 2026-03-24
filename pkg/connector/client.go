@@ -241,6 +241,14 @@ func (c *XploraClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (
 	if name == "" {
 		name = meta.WUID
 	}
+	// Include ghost profile info so the avatar is set when the ghost joins.
+	ghostInfo := &bridgev2.UserInfo{Name: &name}
+	for _, w := range c.meta.Children {
+		if w.ChildUID() == meta.WUID && w.AvatarURL != "" {
+			ghostInfo.Avatar = makeURLAvatar(w.AvatarURL)
+			break
+		}
+	}
 	members := []bridgev2.ChatMember{
 		{
 			EventSender: bridgev2.EventSender{IsFromMe: true},
@@ -249,6 +257,7 @@ func (c *XploraClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (
 		{
 			EventSender: bridgev2.EventSender{Sender: ghostIDFromWUID(meta.WUID)},
 			Membership:  event.MembershipJoin,
+			UserInfo:    ghostInfo,
 		},
 	}
 	return &bridgev2.ChatInfo{
@@ -388,13 +397,31 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 
 	// Identify the watch UID: the child's ID is either the receiver
 	// (parent→child message) or the sender (child→parent message).
+	// The Xplora signIn API returns the watch DEVICE ID as the ward ID, but
+	// FCM messages use the child's user ACCOUNT ID (a shorter hex string).
+	// We match against both the stored ChildUID and any previously learned FCMID.
+	// On first match we record the FCMID so subsequent messages match immediately.
 	wuid := ""
-	for _, w := range c.meta.Children {
+	matchIdx := -1
+	for i, w := range c.meta.Children {
 		childUID := w.ChildUID()
-		if ct.Receiver == childUID || ct.Sender == childUID {
+		if ct.Receiver == childUID || ct.Sender == childUID ||
+			(w.FCMID != "" && (ct.Receiver == w.FCMID || ct.Sender == w.FCMID)) {
 			wuid = childUID
+			matchIdx = i
 			break
 		}
+	}
+	// Fallback: if we couldn't match and there's exactly one child, assume the
+	// message is for them and learn their FCM user ID from the payload.
+	if wuid == "" && len(c.meta.Children) == 1 {
+		wuid = c.meta.Children[0].ChildUID()
+		matchIdx = 0
+		c.log.Debug().
+			Str("sender", ct.Sender).
+			Str("receiver", ct.Receiver).
+			Str("assumed_wuid", wuid).
+			Msg("FCM direct parse: single child, assuming message is for them")
 	}
 	if wuid == "" {
 		knownUIDs := make([]string, 0, len(c.meta.Children))
@@ -407,6 +434,23 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Strs("known_child_uids", knownUIDs).
 			Msg("FCM direct parse: could not match sender/receiver to a known child")
 		return xplora.ChatMessage{}, "", false
+	}
+	// Learn the child's FCM user ID if we don't have it yet.
+	// In a parent→child message the receiver IS the child's FCM account ID.
+	// In a child→parent message the sender is the child's FCM account ID.
+	if matchIdx >= 0 && c.meta.Children[matchIdx].FCMID == "" {
+		fcmID := ""
+		if ct.Receiver != wuid && ct.Receiver != "" {
+			fcmID = ct.Receiver
+		} else if ct.Sender != wuid && ct.Sender != c.meta.UserID && ct.Sender != "" {
+			fcmID = ct.Sender
+		}
+		if fcmID != "" {
+			c.meta.Children[matchIdx].FCMID = fcmID
+			ctx := c.userLogin.Log.WithContext(context.Background())
+			c.userLogin.Save(ctx)
+			c.log.Debug().Str("wuid", wuid).Str("fcm_id", fcmID).Msg("Learned FCM user ID for child")
+		}
 	}
 
 	msgIDStr := fmt.Sprintf("%d", ct.MsgID)
@@ -602,24 +646,25 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 
 	newest := msgs[0].MsgID
 
-	// First poll: just set the cursor without dispatching history.
-	if lastMsgID == "" {
+	// Find messages newer than the cursor and dispatch them in chronological order.
+	// On the very first poll (lastMsgID == "") we dispatch all fetched messages so
+	// that the message which triggered the poll (e.g. an FCM push we couldn't
+	// match directly) is not silently dropped.
+	var newMsgs []xplora.ChatMessage
+	for _, msg := range msgs {
+		if lastMsgID == "" || msg.MsgID > lastMsgID {
+			newMsgs = append(newMsgs, msg)
+		}
+	}
+	if lastMsgID == "" && len(newMsgs) == 0 {
+		// No messages at all on first poll — just record the cursor position.
 		if portal != nil {
 			if meta, ok := portal.Metadata.(*PortalMetadata); ok && newest > meta.LastMsgID {
 				meta.LastMsgID = newest
 				portal.Save(ctx)
-				c.log.Debug().Str("wuid", wuid).Str("cursor", newest).Msg("Poll: cursor initialised, no history dispatched")
 			}
 		}
 		return
-	}
-
-	// Find messages newer than the cursor and dispatch them in chronological order.
-	var newMsgs []xplora.ChatMessage
-	for _, msg := range msgs {
-		if msg.MsgID > lastMsgID {
-			newMsgs = append(newMsgs, msg)
-		}
 	}
 	for i := len(newMsgs) - 1; i >= 0; i-- {
 		msg := newMsgs[i]
@@ -698,6 +743,10 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 			CreatePortal: true,
 		},
 		GetChatInfoFunc: func(ctx context.Context, _ *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+			ghostInfo := &bridgev2.UserInfo{Name: ptrStr(childName)}
+			if avatarURL != "" {
+				ghostInfo.Avatar = makeURLAvatar(avatarURL)
+			}
 			members := []bridgev2.ChatMember{
 				{
 					EventSender: bridgev2.EventSender{IsFromMe: true},
@@ -706,6 +755,7 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 				{
 					EventSender: bridgev2.EventSender{Sender: ghostIDFromWUID(wuid)},
 					Membership:  event.MembershipJoin,
+					UserInfo:    ghostInfo,
 				},
 			}
 			name := childName
