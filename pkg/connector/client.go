@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -620,6 +621,10 @@ func makeURLAvatar(avatarURL string) *bridgev2.Avatar {
 				return nil, err
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+				return nil, fmt.Errorf("avatar fetch returned HTTP %d from %s: %s", resp.StatusCode, avatarURL, bytes.TrimSpace(body))
+			}
 			return io.ReadAll(resp.Body)
 		},
 	}
