@@ -286,8 +286,19 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 				SenderID: networkid.UserID(c.meta.UserID),
 			},
 		}, nil
+	case event.MsgImage, event.MsgAudio, event.MsgVideo, event.MsgFile:
+		// Media sending to Xplora is not yet implemented — mutation unknown.
+		// Log the full content so we can investigate what the API might accept.
+		c.log.Info().
+			Str("wuid", meta.WUID).
+			Str("mx_msg_type", string(msg.Content.MsgType)).
+			Str("mime_type", msg.Content.GetInfo().MimeType).
+			Str("filename", msg.Content.Body).
+			Int("size", msg.Content.GetInfo().Size).
+			Msg("Matrix→Xplora: received media message (sending not yet supported)")
+		return nil, fmt.Errorf("sending %s to Xplora is not yet supported", msg.Content.MsgType)
 	default:
-		return nil, fmt.Errorf("unsupported message type %s (Xplora supports text only)", msg.Content.MsgType)
+		return nil, fmt.Errorf("unsupported message type %s", msg.Content.MsgType)
 	}
 }
 
@@ -350,6 +361,12 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	}
 	ct := envelope.Content
 	if ct.MsgID == 0 || ct.MsgType == "" {
+		return xplora.ChatMessage{}, "", false
+	}
+
+	// Emoticon FCM payloads don't include the emoticon_id; the full data is only
+	// available via chatsNew. Returning false triggers a poll which fetches it.
+	if ct.MsgType == "chat_emoticon" {
 		return xplora.ChatMessage{}, "", false
 	}
 

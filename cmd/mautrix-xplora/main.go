@@ -21,5 +21,8 @@ func main() {
 		Connector:   &connector.XploraConnector{},
 	}
 	m.InitVersion(Tag, Commit, BuildTime)
+	m.PostInit = func() {
+		connector.RegisterCommands(m.Bridge)
+	}
 	m.Run()
 }

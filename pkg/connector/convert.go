@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/palchrb/matrix-xplora/internal/xplora"
@@ -11,23 +14,30 @@ import (
 	"maunium.net/go/mautrix/event"
 )
 
+// xploraEmoticonMap maps Xplora emoticon IDs to Unicode emoji characters.
+// Source: pyxplora_api status.py — M<id> enum values.
+var xploraEmoticonMap = map[int]string{
+	1001: "😄", 1002: "😏", 1003: "😘", 1004: "😅", 1005: "😂",
+	1006: "😭", 1007: "😍", 1008: "😎", 1009: "😜", 1010: "😳",
+	1011: "🥱", 1012: "👏", 1013: "😡", 1014: "👍", 1015: "😏",
+	1016: "😓", 1017: "🍧", 1018: "😮", 1020: "🎁", 1022: "☺️", 1024: "🌹",
+}
+
 // convertChatMessage converts an xplora.ChatMessage into Matrix events.
-// The message body is extracted from the `data` JSON blob in the API response.
-// Called by the simplevent.Message handler inside the bridge event loop.
+// IMAGE and VOICE messages are downloaded from the Xplora CDN and reuploaded
+// to the Matrix media repository. Other types fall back to text.
 func (c *XploraClient) convertChatMessage(
 	ctx context.Context,
-	_ *bridgev2.Portal,
-	_ bridgev2.MatrixAPI,
+	portal *bridgev2.Portal,
+	intent bridgev2.MatrixAPI,
 	msg xplora.ChatMessage,
 ) (*bridgev2.ConvertedMessage, error) {
-	body := extractMessageText(msg)
+	msgType := derefStr(msg.Type)
 
 	ts := time.Now()
 	if msg.Create != nil {
 		ts = time.Unix(*msg.Create, 0) // Xplora chatsNew create is Unix seconds
 	}
-
-	msgType := derefStr(msg.Type)
 
 	extra := map[string]any{
 		"com.xplora.msg_type": msgType,
@@ -35,6 +45,23 @@ func (c *XploraClient) convertChatMessage(
 		"com.xplora.ts":       ts.UnixMilli(),
 	}
 
+	// IMAGE and VOICE: fetch media URL, download, reupload to Matrix.
+	switch msgType {
+	case "IMAGE", "VOICE":
+		part, err := c.bridgeIncomingMedia(ctx, portal, intent, msg, msgType)
+		if err != nil {
+			c.log.Warn().Err(err).
+				Str("msg_id", msg.MsgID).
+				Str("msg_type", msgType).
+				Msg("Failed to bridge media, using placeholder text")
+			// Fall through to text path below.
+		} else {
+			part.Extra = extra
+			return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}, nil
+		}
+	}
+
+	body := extractMessageText(msg)
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{{
 			Type: event.EventMessage,
@@ -45,6 +72,105 @@ func (c *XploraClient) convertChatMessage(
 			Extra: extra,
 		}},
 	}, nil
+}
+
+// bridgeIncomingMedia fetches an image or voice message from the Xplora CDN
+// and uploads it to the Matrix media repository via the ghost user's intent.
+func (c *XploraClient) bridgeIncomingMedia(
+	ctx context.Context,
+	portal *bridgev2.Portal,
+	intent bridgev2.MatrixAPI,
+	msg xplora.ChatMessage,
+	msgType string,
+) (*bridgev2.ConvertedMessagePart, error) {
+	meta, ok := portal.Metadata.(*PortalMetadata)
+	if !ok || meta.WUID == "" {
+		return nil, fmt.Errorf("portal has no WUID")
+	}
+
+	var mediaURL string
+	var err error
+	switch msgType {
+	case "IMAGE":
+		mediaURL, err = c.gql.FetchChatImage(ctx, meta.WUID, msg.MsgID)
+	case "VOICE":
+		mediaURL, err = c.gql.FetchChatVoice(ctx, meta.WUID, msg.MsgID)
+	default:
+		return nil, fmt.Errorf("unsupported media type: %s", msgType)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch media URL: %w", err)
+	}
+	if mediaURL == "" {
+		return nil, fmt.Errorf("empty media URL returned by API")
+	}
+
+	data, err := downloadURL(ctx, mediaURL)
+	if err != nil {
+		return nil, fmt.Errorf("download from %s: %w", mediaURL, err)
+	}
+
+	// Detect MIME type from content; fall back to sensible defaults.
+	mimeType := http.DetectContentType(data)
+	var mxMsgType event.MessageType
+	var filename string
+	switch msgType {
+	case "IMAGE":
+		mxMsgType = event.MsgImage
+		filename = "image.jpg"
+		if !strings.HasPrefix(mimeType, "image/") {
+			mimeType = "image/jpeg"
+		}
+	case "VOICE":
+		mxMsgType = event.MsgAudio
+		filename = "voice.amr"
+		if !strings.HasPrefix(mimeType, "audio/") {
+			mimeType = "audio/amr"
+		}
+	}
+
+	mxcURI, encryptedFile, err := intent.UploadMedia(ctx, "", data, filename, mimeType)
+	if err != nil {
+		return nil, fmt.Errorf("upload to Matrix: %w", err)
+	}
+
+	content := &event.MessageEventContent{
+		MsgType: mxMsgType,
+		Body:    filename,
+		URL:     mxcURI,
+		File:    encryptedFile,
+		Info: &event.FileInfo{
+			MimeType: mimeType,
+			Size:     len(data),
+		},
+	}
+	if mxMsgType == event.MsgAudio {
+		// Mark as voice message per MSC3245. Duration unknown until format is confirmed.
+		content.MSC3245Voice = &event.MSC3245Voice{}
+		content.MSC1767Audio = &event.MSC1767Audio{Waveform: []int{}}
+	}
+
+	return &bridgev2.ConvertedMessagePart{
+		Type:    event.EventMessage,
+		Content: content,
+	}, nil
+}
+
+// downloadURL fetches the contents of a URL using a context-aware GET request.
+func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from media server", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // extractMessageText parses the `data` JSON value from the Xplora API response.
@@ -142,17 +268,25 @@ func formatCallLog(data json.RawMessage) string {
 	}
 }
 
-// formatEmoticon parses EMOTICON data and returns a human-readable description.
-// Expected fields: sender_name, emoticon_id.
+// formatEmoticon parses EMOTICON data and returns the corresponding Unicode emoji.
+// The emoticon_id field (int or string) is looked up in xploraEmoticonMap.
 func formatEmoticon(data json.RawMessage) string {
 	var d struct {
-		SenderName string `json:"sender_name"`
+		EmoticonID any `json:"emoticon_id"`
 	}
-	if err := json.Unmarshal(data, &d); err != nil {
+	if err := json.Unmarshal(data, &d); err != nil || d.EmoticonID == nil {
 		return ""
 	}
-	if d.SenderName != "" {
-		return fmt.Sprintf("[Sticker from %s]", d.SenderName)
+
+	var id int
+	switch v := d.EmoticonID.(type) {
+	case float64:
+		id = int(v)
+	case string:
+		fmt.Sscanf(v, "%d", &id)
+	}
+	if emoji, ok := xploraEmoticonMap[id]; ok {
+		return emoji
 	}
 	return "[Sticker]"
 }
