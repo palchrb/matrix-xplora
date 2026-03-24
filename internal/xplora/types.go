@@ -53,8 +53,14 @@ type ChildEntry struct {
 
 // UserRef is a brief user reference embedded in ChildEntry and ChatMessage.
 type UserRef struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string   `json:"id"`
+	Name string   `json:"name"`
+	File *FileRef `json:"file,omitempty"`
+}
+
+// FileRef holds the ID of a user's profile picture as returned by the Xplora API.
+type FileRef struct {
+	ID string `json:"id"`
 }
 
 // W360 holds an alternative token/secret pair returned by signIn.
@@ -75,10 +81,12 @@ type RefreshTokenResponse struct {
 
 // WatchInfo represents a child's smartwatch linked to the parent account.
 // ID is the watch device ID. User.ID is the child's user ID used for chatsNew.
+// AvatarURL is updated from FCM sender_icon pushes and persisted in login metadata.
 type WatchInfo struct {
-	ID   string   `json:"id"`
-	Name *string  `json:"name"`
-	User *UserRef `json:"user"`
+	ID        string   `json:"id"`
+	Name      *string  `json:"name"`
+	User      *UserRef `json:"user"`
+	AvatarURL string   `json:"avatarUrl,omitempty"`
 }
 
 // ChildUID returns the child's user ID for use in chatsNew queries.

@@ -32,6 +32,9 @@ mutation signInWithEmailOrPhone(
         ward {
           id
           name
+          file {
+            id
+          }
         }
       }
     }
