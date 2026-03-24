@@ -5,17 +5,21 @@ package xplora
 const (
 	MutationSignIn = `
 mutation signInWithEmailOrPhone(
-  $countryCode: String
-  $phoneNumber: String!
+  $countryPhoneNumber: String
+  $phoneNumber: String
   $password: String!
-  $userAgent: String
-  $timeZone: String
+  $emailAddress: String
+  $client: ClientType!
+  $userLang: String!
+  $timeZone: String!
 ) {
   signInWithEmailOrPhone(
-    countryCode: $countryCode
+    countryPhoneNumber: $countryPhoneNumber
     phoneNumber: $phoneNumber
     password: $password
-    userAgent: $userAgent
+    emailAddress: $emailAddress
+    client: $client
+    userLang: $userLang
     timeZone: $timeZone
   ) {
     id

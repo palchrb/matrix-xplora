@@ -2,6 +2,7 @@ package xplora
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 )
@@ -10,12 +11,15 @@ import (
 // Populates auth credentials on success; this is the only method that can
 // be called when auth.Token() is empty.
 func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string) (*AuthResponse, error) {
+	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
-		"countryCode": countryCode,
-		"phoneNumber": phone,
-		"password":    password,
-		"userAgent":   "mautrix-xplora",
-		"timeZone":    "UTC",
+		"countryPhoneNumber": countryCode,
+		"phoneNumber":        phone,
+		"password":           passwordMD5,
+		"emailAddress":       nil,
+		"client":             "APP",
+		"userLang":           "en",
+		"timeZone":           "UTC",
 	}
 	data, err := c.do(ctx, MutationSignIn, vars)
 	if err != nil {

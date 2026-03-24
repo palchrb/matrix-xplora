@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 )
 
-const graphQLEndpoint = "https://api.myxplora.com/api"
+const (
+	graphQLEndpoint = "https://api.myxplora.com/api"
+	apiKey          = "fc45d50304511edbf67a12b93c413b6a"
+	apiSecret       = "1e9b6fe0327711ed959359c157878dcb"
+)
 
 // Client is a GraphQL client for the Xplora API.
 // All methods (except SignIn) require a valid bearer token obtained during login.
@@ -73,10 +79,14 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 	if err != nil {
 		return nil, fmt.Errorf("xplora: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	now := time.Now().UTC()
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("H-Date", now.Format(http.TimeFormat))
+	req.Header.Set("H-Tid", strconv.FormatInt(now.Unix(), 10))
 	if token := c.auth.Token(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("H-BackDoor-Authorization", "Bearer "+token+":"+apiSecret)
+	} else {
+		req.Header.Set("H-BackDoor-Authorization", "Open "+apiKey+":"+apiSecret)
 	}
 
 	resp, err := c.httpClient.Do(req)
