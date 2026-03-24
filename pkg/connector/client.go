@@ -67,7 +67,8 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 
 	// Validate session with a lightweight API call.
-	if _, err := c.gql.GetMyInfo(ctx); err != nil {
+	myInfo, err := c.gql.GetMyInfo(ctx)
+	if err != nil {
 		// Token may have expired mid-session; try refreshing once before giving up.
 		if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
 			c.userLogin.BridgeState.Send(status.BridgeState{
@@ -77,7 +78,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			})
 			return
 		}
-		if _, err2 := c.gql.GetMyInfo(ctx); err2 != nil {
+		var err2 error
+		myInfo, err2 = c.gql.GetMyInfo(ctx)
+		if err2 != nil {
 			c.userLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateBadCredentials,
 				Error:      "xplora-auth-error",
@@ -85,6 +88,21 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			})
 			return
 		}
+	}
+	if myInfo != nil {
+		name := ""
+		if myInfo.Name != nil {
+			name = *myInfo.Name
+		}
+		c.log.Debug().Str("my_info_id", myInfo.ID).Str("my_info_name", name).Msg("GetMyInfo result (parent user ID format)")
+	}
+	for _, w := range c.meta.Children {
+		c.log.Debug().
+			Str("child_uid", w.ChildUID()).
+			Str("watch_id", w.ID).
+			Str("fcm_id", w.FCMID).
+			Str("name", w.ChildName()).
+			Msg("Known child at connect")
 	}
 
 	// Sync portals (one per child watch) on every connect.
@@ -685,8 +703,22 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 	}
 	for i := len(newMsgs) - 1; i >= 0; i-- {
 		msg := newMsgs[i]
-		isFromMe := msg.Sender != nil && msg.Sender.ID == c.meta.UserID
-		c.dispatchChatMessage(wuid, msg, isFromMe)
+		// In GetChats responses the sender.id is the Xplora user ID.
+		// The child's user ID equals wuid, so we can reliably identify direction.
+		isFromChild := msg.Sender != nil && msg.Sender.ID == wuid
+		c.log.Debug().
+			Str("wuid", wuid).
+			Str("msg_id", msg.MsgID).
+			Str("sender_id", func() string {
+				if msg.Sender != nil {
+					return msg.Sender.ID
+				}
+				return "<nil>"
+			}()).
+			Bool("is_from_child", isFromChild).
+			RawJSON("data", msg.Data).
+			Msg("Poll: dispatching message")
+		c.dispatchChatMessage(wuid, msg, !isFromChild)
 	}
 
 	// Advance the cursor.
