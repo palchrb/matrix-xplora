@@ -108,16 +108,16 @@ type UserInfo struct {
 }
 
 // ChatMessage is a single message from the chatsNew query.
-// data is a JSON blob with type-specific content (e.g. the text for TEXT messages).
+// data is a JSON value with type-specific content (e.g. a string or object with a "text" field).
 // create is the server-side Unix timestamp in milliseconds.
 // sender.id identifies the sender; compare to the parent's user ID to set isFromMe.
 type ChatMessage struct {
-	ID     string   `json:"id"`
-	MsgID  string   `json:"msgId"`
-	Type   *string  `json:"type"`
-	Sender *UserRef `json:"sender"`
-	Data   *string  `json:"data"`
-	Create *int64   `json:"create"`
+	ID     string          `json:"id"`
+	MsgID  string          `json:"msgId"`
+	Type   *string         `json:"type"`
+	Sender *UserRef        `json:"sender"`
+	Data   json.RawMessage `json:"data"`
+	Create *int64          `json:"create"`
 }
 
 // ChatsResponse wraps the paginated chatsNew response.
