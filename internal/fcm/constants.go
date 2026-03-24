@@ -12,10 +12,8 @@ const xk = 0x5A
 
 var (
 	// XploraSenderID is the FCM project_number (sender ID) from the Xplora app's
-	// google-services.json. Extract from APK:
-	//   apktool d xplora.apk
-	//   cat xplora/res/raw/google-services.json | grep project_number
-	// TODO: Fill in after APK extraction.
+	// google-services.json (project: xplora-app-commercial).
+	// Value: 467048062733
 	XploraSenderID string
 
 	// XploraAPKCertSHA1 is the SHA1 of the Xplora app's APK signing certificate.
@@ -34,12 +32,12 @@ var (
 )
 
 func init() {
-	// TODO: Replace these placeholder byte slices with XOR-encoded values
-	// after extracting the constants from the Xplora APK.
-	// Use the decode() function with key 0x5A, same as Garmin bridge.
-	// Example encoding:
-	//   for i, c := range "your-value" { encoded[i] = byte(c) ^ 0x5A }
-	XploraSenderID = ""    // TODO: encode and set
-	XploraAPKCertSHA1 = "" // TODO: encode and set
-	xploraAppPackage = ""  // TODO: encode and set
+	// Values XOR-encoded with key 0x5A (same scheme as Garmin bridge).
+	// Encoding: for i, c := range "your-value" { encoded[i] = byte(c) ^ 0x5A }
+
+	// "467048062733" — FCM project_number from google-services.json
+	XploraSenderID = decode([]byte{0x6e, 0x6c, 0x6d, 0x6a, 0x6e, 0x62, 0x6a, 0x6c, 0x68, 0x6d, 0x69, 0x69}, xk)
+
+	XploraAPKCertSHA1 = "" // TODO: fill in — apksigner verify --print-certs xplora.apk | grep SHA-1
+	xploraAppPackage = ""  // TODO: fill in — grep 'package=' xplora_decompiled/AndroidManifest.xml
 }
