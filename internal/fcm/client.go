@@ -219,6 +219,61 @@ func (c *Client) Register(ctx context.Context) (string, error) {
 	return fcmToken, nil
 }
 
+// Refresh re-registers with GCM using the existing androidId/securityToken to
+// obtain a fresh FCM token. This is safe to call repeatedly and avoids the
+// PHONE_REGISTRATION_ERROR that a full fresh checkin+register would trigger.
+// Returns an error if no prior device credentials exist (call Register() first).
+func (c *Client) Refresh(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.credentials == nil {
+		if err := c.loadCredentials(); err != nil {
+			return "", fmt.Errorf("FCM Refresh: no credentials to refresh: %w", err)
+		}
+	}
+
+	var gcmCreds gcmCredentials
+	if err := json.Unmarshal(c.credentials.Raw, &gcmCreds); err != nil {
+		return "", fmt.Errorf("FCM Refresh: parse stored credentials: %w", err)
+	}
+	if gcmCreds.AndroidID == 0 {
+		return "", fmt.Errorf("FCM Refresh: no androidId in stored credentials")
+	}
+
+	httpClient := c.loggingHTTPClient()
+
+	// Re-checkin with existing device identity to refresh security token.
+	device := DefaultAndroidDevice()
+	androidID, securityToken, err := gcmCheckin(ctx, httpClient, gcmCreds.AndroidID, gcmCreds.SecurityToken, device)
+	if err != nil {
+		return "", fmt.Errorf("FCM Refresh: re-checkin: %w", err)
+	}
+
+	// Re-register to get a fresh FCM token.
+	fcmToken, err := gcmRegister(ctx, httpClient, androidID, securityToken, device)
+	if err != nil {
+		return "", fmt.Errorf("FCM Refresh: re-register: %w", err)
+	}
+	if fcmToken == "" {
+		return "", fmt.Errorf("FCM Refresh: empty token from re-register")
+	}
+
+	rawCreds, err := json.Marshal(gcmCredentials{AndroidID: androidID, SecurityToken: securityToken})
+	if err != nil {
+		return "", fmt.Errorf("FCM Refresh: serialize credentials: %w", err)
+	}
+
+	c.credentials.Raw = rawCreds
+	c.credentials.Token = fcmToken
+	if err := c.saveCredentials(); err != nil {
+		c.logger.Error("FCM Refresh: failed to save refreshed credentials", "error", err)
+	}
+
+	c.logger.Info("FCM token refreshed", "token_prefix", truncate(fcmToken, 20))
+	return fcmToken, nil
+}
+
 // Listen connects to Google's MCS and processes incoming push notifications.
 // Blocks until ctx is cancelled. Call Register() first.
 func (c *Client) Listen(ctx context.Context) error {

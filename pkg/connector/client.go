@@ -114,11 +114,24 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 
 	// Register the FCM token with the Xplora backend.
+	// If this fails with a cached token (e.g. after logout+login), refresh the
+	// FCM token using the existing androidId and retry once before falling back.
 	if err := c.gql.SetFCMToken(ctx, c.meta.ClientID, fcmToken); err != nil {
-		c.log.Warn().Err(err).Msg("setFCMToken failed, starting polling fallback")
-		c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-		c.startPolling(ctx)
-		return
+		c.log.Warn().Err(err).Msg("SetFCMToken failed with cached token, attempting FCM refresh")
+		refreshed, refreshErr := c.fcmClient.Refresh(ctx)
+		if refreshErr != nil {
+			c.log.Warn().Err(refreshErr).Msg("FCM refresh failed, starting polling fallback")
+			c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+			c.startPolling(ctx)
+			return
+		}
+		fcmToken = refreshed
+		if err := c.gql.SetFCMToken(ctx, c.meta.ClientID, fcmToken); err != nil {
+			c.log.Warn().Err(err).Msg("SetFCMToken failed after refresh, starting polling fallback")
+			c.userLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+			c.startPolling(ctx)
+			return
+		}
 	}
 	c.meta.FCMToken = fcmToken
 	c.userLogin.Save(ctx)
@@ -179,11 +192,16 @@ func (c *XploraClient) IsLoggedIn() bool {
 	return c.auth.Token() != ""
 }
 
-// LogoutRemote clears on-disk credentials.
+// LogoutRemote clears Xplora session credentials.
+// FCM credentials are intentionally kept: they represent a persistent "virtual
+// Android device" identity used for GCM registration. Deleting them forces a
+// fresh GCM checkin on the next login, which triggers PHONE_REGISTRATION_ERROR
+// due to Google rate-limiting re-registrations for the same sender/cert pair.
+// On re-login, Connect() calls SetFCMToken() again to re-associate the existing
+// FCM token with the new Xplora session.
 func (c *XploraClient) LogoutRemote(_ context.Context) {
 	sessDir := c.connector.sessionDir(c.userLogin.ID)
 	removeFile(sessDir + "/xplora_credentials.json")
-	removeFile(sessDir + "/fcm_credentials.json")
 }
 
 // GetCapabilities returns Matrix room feature limits for Xplora.
