@@ -100,6 +100,19 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("saving Xplora credentials: %w", err)
 	}
 
+	// Build WatchInfo list from sign-in response children.
+	var children []xplora.WatchInfo
+	for _, c := range authResp.User.Children {
+		if c.Ward != nil && c.Ward.ID != "" {
+			name := c.Ward.Name
+			children = append(children, xplora.WatchInfo{
+				ID:   c.Ward.ID,
+				Name: &name,
+				User: c.Ward,
+			})
+		}
+	}
+
 	// Generate a stable ClientID for FCM registration (reused forever).
 	clientID := uuid.New().String()
 
@@ -108,6 +121,7 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		CountryCode: countryCode,
 		UserID:      userID,
 		ClientID:    clientID,
+		Children:    children,
 	}
 
 	ul, err := xl.user.NewLogin(ctx, &database.UserLogin{

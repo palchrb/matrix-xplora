@@ -96,26 +96,6 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 	return &result.ReadMyInfo, nil
 }
 
-// GetWatches returns the list of children's watches linked to this account.
-// uid is the parent's user ID.
-func (c *Client) GetWatches(ctx context.Context, uid string) ([]WatchInfo, error) {
-	vars := map[string]any{"uid": uid}
-	data, err := c.do(ctx, QueryWatches, vars)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: remove after verifying correct field name
-	fmt.Printf("[DEBUG GetWatches] raw response: %s\n", string(data))
-
-	var result struct {
-		Watches []WatchInfo `json:"watches"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("parsing watches response: %w", err)
-	}
-	return result.Watches, nil
-}
 
 // GetChats fetches paginated chat messages for a given watch's child user ID.
 // msgID optionally filters to messages after a given message ID.
