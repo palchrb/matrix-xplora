@@ -117,6 +117,7 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 
 	now := time.Now().UTC()
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", "okhttp/4.9.3")
 	req.Header.Set("H-Date", now.Format(http.TimeFormat))
 	req.Header.Set("H-Tid", strconv.FormatInt(now.Unix(), 10))
 	req.Header.Set("H-BackDoor-Authorization", c.backdoorAuth())
