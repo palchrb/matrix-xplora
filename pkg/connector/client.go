@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // recentSent records a message recently sent from Matrix to Xplora,
@@ -364,49 +366,116 @@ func (c *XploraClient) IsThisUser(_ context.Context, userID networkid.UserID) bo
 
 // ─── Matrix → Xplora ─────────────────────────────────────────────────────────
 
-// HandleMatrixMessage sends a Matrix text message to an Xplora child's watch.
+// HandleMatrixMessage sends a Matrix message to an Xplora child's watch.
+// Supported types: text, image, audio/voice, and single-emoji emoticons.
 func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	meta, ok := msg.Portal.Metadata.(*PortalMetadata)
 	if !ok || meta.WUID == "" {
 		return nil, fmt.Errorf("portal has no watch UID — cannot send")
 	}
 
+	var params xplora.SendChatMsgParams
+
 	switch msg.Content.MsgType {
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
-		// Record BEFORE sending: Xplora may send the FCM echo before the HTTP
-		// response returns, so we must have sentAtMs in recentSents already.
-		sentAtMs := time.Now().UnixMilli()
-		c.recentSentMu.Lock()
-		c.recentSents = append(c.recentSents, recentSent{sentAtMs: sentAtMs})
-		c.recentSentMu.Unlock()
-		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
-			// Send failed — remove the pre-recorded entry so it doesn't linger.
-			c.consumeRecentSent(sentAtMs)
-			c.handleAPIError(ctx, err)
-			return nil, fmt.Errorf("sendChatText: %w", err)
+		// If the text is a single emoji that maps to an Xplora emoticon, send
+		// it as EMOTICON so the watch renders the native sticker graphic.
+		if emoticonID, ok := emojiToXploraEmoticon[msg.Content.Body]; ok {
+			params = xplora.SendChatMsgParams{Type: "EMOTICON", EmoticonID: emoticonID}
+		} else {
+			params = xplora.SendChatMsgParams{Type: "TEXT", Text: msg.Content.Body}
 		}
-		// Xplora sendChatText returns a boolean, not a message ID.
-		// Use a synthetic ID based on timestamp for deduplication.
-		syntheticID := fmt.Sprintf("sent-%d", time.Now().UnixMilli())
-		return &bridgev2.MatrixMessageResponse{
-			DB: &database.Message{
-				ID:       networkid.MessageID(syntheticID),
-				SenderID: networkid.UserID(c.meta.UserID),
-			},
-		}, nil
-	case event.MsgImage, event.MsgAudio, event.MsgVideo, event.MsgFile:
-		// Media sending to Xplora is not yet implemented — mutation unknown.
-		// Log the full content so we can investigate what the API might accept.
-		c.log.Info().
-			Str("wuid", meta.WUID).
-			Str("mx_msg_type", string(msg.Content.MsgType)).
-			Str("mime_type", msg.Content.GetInfo().MimeType).
-			Str("filename", msg.Content.Body).
-			Int("size", msg.Content.GetInfo().Size).
-			Msg("Matrix→Xplora: received media message (sending not yet supported)")
-		return nil, fmt.Errorf("sending %s to Xplora is not yet supported", msg.Content.MsgType)
+
+	case event.MsgImage:
+		data, mimeType, err := c.downloadMatrixMedia(ctx, msg)
+		if err != nil {
+			return nil, fmt.Errorf("download image: %w", err)
+		}
+		params = xplora.SendChatMsgParams{
+			Type:   "IMAGE",
+			Body:   base64.StdEncoding.EncodeToString(data),
+			Format: mimeTypeToFormat(mimeType),
+		}
+
+	case event.MsgAudio, event.MsgVideo:
+		data, _, err := c.downloadMatrixMedia(ctx, msg)
+		if err != nil {
+			return nil, fmt.Errorf("download audio: %w", err)
+		}
+		durationSec := msg.Content.GetInfo().Duration / 1000
+		params = xplora.SendChatMsgParams{
+			Type:     "VOICE",
+			Body:     base64.StdEncoding.EncodeToString(data),
+			Duration: durationSec,
+		}
+
 	default:
 		return nil, fmt.Errorf("unsupported message type %s", msg.Content.MsgType)
+	}
+
+	// Record BEFORE sending so FCM echo suppression works correctly.
+	sentAtMs := time.Now().UnixMilli()
+	c.recentSentMu.Lock()
+	c.recentSents = append(c.recentSents, recentSent{sentAtMs: sentAtMs})
+	c.recentSentMu.Unlock()
+
+	msgID, err := c.gql.SendChatMsg(ctx, meta.WUID, params)
+	if err != nil {
+		c.consumeRecentSent(sentAtMs)
+		c.handleAPIError(ctx, err)
+		return nil, fmt.Errorf("sendChatMsg: %w", err)
+	}
+
+	if msgID == "" {
+		msgID = fmt.Sprintf("sent-%d", sentAtMs)
+	}
+	return &bridgev2.MatrixMessageResponse{
+		DB: &database.Message{
+			ID:       networkid.MessageID(msgID),
+			SenderID: networkid.UserID(c.meta.UserID),
+		},
+	}, nil
+}
+
+// downloadMatrixMedia downloads the media file referenced in a Matrix message
+// and returns the raw bytes and detected MIME type.
+func (c *XploraClient) downloadMatrixMedia(ctx context.Context, msg *bridgev2.MatrixMessage) ([]byte, string, error) {
+	var uri id.ContentURIString
+	var encFile *event.EncryptedFileInfo
+	if msg.Content.File != nil {
+		uri = msg.Content.File.URL
+		encFile = msg.Content.File
+	} else {
+		uri = msg.Content.URL
+	}
+	if uri == "" {
+		return nil, "", fmt.Errorf("no media URL in message")
+	}
+	data, err := msg.Portal.Bridge.Bot.DownloadMedia(ctx, uri, encFile)
+	if err != nil {
+		return nil, "", err
+	}
+	mimeType := http.DetectContentType(data)
+	if info := msg.Content.GetInfo(); info != nil && info.MimeType != "" {
+		mimeType = info.MimeType
+	}
+	return data, mimeType, nil
+}
+
+// mimeTypeToFormat converts a MIME type to the format string Xplora expects
+// in the sendChatMsg IMAGE mutation (e.g. "image/jpeg" → "jpg").
+func mimeTypeToFormat(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg", "image/jpg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/gif":
+		return "gif"
+	case "image/webp":
+		return "webp"
+	default:
+		return "jpg"
 	}
 }
 

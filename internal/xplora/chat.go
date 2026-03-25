@@ -132,6 +132,59 @@ func (c *Client) SendChatText(ctx context.Context, wuid, text string) error {
 	return err
 }
 
+// SendChatMsgParams holds parameters for the unified SendChatMsg mutation.
+type SendChatMsgParams struct {
+	Type       string // required: TEXT, IMAGE, VOICE, EMOTICON
+	Text       string // for TEXT
+	Body       string // base64-encoded file data for IMAGE and VOICE
+	EmoticonID string // ChatEmoticonType enum value, e.g. "M1001", for EMOTICON
+	Format     string // image format extension, e.g. "jpg", for IMAGE
+	FileName   string // optional file name for audio
+	Duration   int    // voice duration in seconds, for VOICE
+	Tm         string // optional timestamp override
+}
+
+// SendChatMsg sends any message type to a watch using the unified mutation.
+// It returns the message ID assigned by Xplora (Unix-ms as a string).
+func (c *Client) SendChatMsg(ctx context.Context, wuid string, p SendChatMsgParams) (string, error) {
+	vars := map[string]any{
+		"uid":  wuid,
+		"type": p.Type,
+	}
+	if p.Text != "" {
+		vars["text"] = p.Text
+	}
+	if p.Body != "" {
+		vars["body"] = p.Body
+	}
+	if p.EmoticonID != "" {
+		vars["emoticonId"] = p.EmoticonID
+	}
+	if p.Format != "" {
+		vars["format"] = p.Format
+	}
+	if p.FileName != "" {
+		vars["fileName"] = p.FileName
+	}
+	if p.Duration > 0 {
+		vars["duration"] = p.Duration
+	}
+	if p.Tm != "" {
+		vars["tm"] = p.Tm
+	}
+	data, err := c.do(ctx, MutationSendChatMsg, vars)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		SendChatMsg string `json:"sendChatMsg"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing sendChatMsg response: %w", err)
+	}
+	return result.SendChatMsg, nil
+}
+
 // SetReadChatMsg marks a specific message as read.
 func (c *Client) SetReadChatMsg(ctx context.Context, wuid, msgID string) error {
 	vars := map[string]any{

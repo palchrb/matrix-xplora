@@ -23,6 +23,20 @@ var xploraEmoticonMap = map[int]string{
 	1016: "😓", 1017: "🍧", 1018: "😮", 1020: "🎁", 1022: "☺️", 1024: "🌹",
 }
 
+// emojiToXploraEmoticon is the reverse of xploraEmoticonMap: maps a Unicode
+// emoji to the Xplora ChatEmoticonType enum value (e.g. "M1001").
+// Used when a Matrix user sends a single emoji that matches an Xplora sticker.
+var emojiToXploraEmoticon = func() map[string]string {
+	m := make(map[string]string, len(xploraEmoticonMap))
+	for id, emoji := range xploraEmoticonMap {
+		key := fmt.Sprintf("M%d", id)
+		if _, exists := m[emoji]; !exists { // keep first mapping on duplicate emoji
+			m[emoji] = key
+		}
+	}
+	return m
+}()
+
 // convertChatMessage converts an xplora.ChatMessage into Matrix events.
 // IMAGE and VOICE messages are downloaded from the Xplora CDN and reuploaded
 // to the Matrix media repository. Other types fall back to text.

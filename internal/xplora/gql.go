@@ -88,6 +88,18 @@ mutation SendChatText($uid: String!, $text: String!) {
   sendChatText(uid: $uid, text: $text)
 }`
 
+	// MutationSendChatMsg is the unified send mutation used by the Xplora app
+	// (apollo-kotlin). It handles all message types via the $type discriminator:
+	//   TEXT     — $text contains the message body
+	//   IMAGE    — $body contains base64-encoded image, $format is the extension
+	//   VOICE    — $body contains base64-encoded AMR audio, $duration in seconds
+	//   EMOTICON — $emoticonId is a ChatEmoticonType enum value (e.g. "M1001")
+	// Returns the assigned message ID as a string (Unix-ms timestamp).
+	MutationSendChatMsg = `
+mutation SendChatMsg($body: String, $duration: Int, $emoticonId: ChatEmoticonType, $fileName: String, $format: String, $text: String, $tm: String, $type: ChatType!, $uid: String!) {
+  sendChatMsg(body: $body, duration: $duration, emoticonId: $emoticonId, fileName: $fileName, format: $format, text: $text, tm: $tm, type: $type, uid: $uid)
+}`
+
 	// MutationSetReadChatMsg marks a chat message as read.
 	// Note: the API field is setReadChatMsg (no trailing M).
 	MutationSetReadChatMsg = `
