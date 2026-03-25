@@ -91,6 +91,8 @@ func (a *Auth) RefreshToken() string {
 
 // NeedsRefresh returns true if the token is expired or will expire within 5 minutes.
 // Returns false if the expiry date cannot be parsed (assume still valid).
+// expireDate may arrive as RFC3339 ("2026-03-25T10:00:00Z") or as a Unix-ms
+// number stored as a string ("1774426570000") — both formats are handled.
 func (a *Auth) NeedsRefresh() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -99,7 +101,13 @@ func (a *Auth) NeedsRefresh() bool {
 	}
 	expiry, err := time.Parse(time.RFC3339, a.creds.ExpireDate)
 	if err != nil {
-		return false
+		// Try Unix-ms fallback.
+		var ms int64
+		if _, scanErr := fmt.Sscanf(a.creds.ExpireDate, "%d", &ms); scanErr == nil && ms > 0 {
+			expiry = time.UnixMilli(ms)
+		} else {
+			return false
+		}
 	}
 	return time.Until(expiry) < 5*time.Minute
 }
