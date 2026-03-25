@@ -6,15 +6,25 @@ Bridges the Xplora parent app chat to Matrix, so you can message your child's wa
 
 ## Status
 
-**Alpha / work in progress.** Text messaging, read receipts, and FCM push notifications work.
+**Alpha / work in progress.**
 
 ## Features
 
-- Send and receive text messages to/from Xplora watches
-- Read receipt sync
-- Auto-creates one Matrix room per linked child watch
+**Messaging**
+- Send and receive text messages
+- Send and receive images
+- Send and receive voice messages
+- Send and receive emoticons/stickers
+- Single emoji in Matrix maps to the matching Xplora sticker when available
+- Read receipt sync (Matrix → watch)
+
+**Infrastructure**
 - FCM push notifications (messages arrive within seconds)
 - Polling fallback when FCM is unavailable
+- Automatic token refresh with proactive expiry detection
+- Session health check every 10 minutes — notifies in Matrix if session is invalidated (e.g. another device logged in)
+- Auto-creates one Matrix room per linked child watch
+- Child watch avatars synced to Matrix
 
 ## Requirements
 
