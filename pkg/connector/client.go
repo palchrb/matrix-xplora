@@ -359,6 +359,7 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
 			// Send failed — remove the pre-recorded entry so it doesn't linger.
 			c.consumeRecentSent(sentAtMs)
+			c.handleAPIError(ctx, err)
 			return nil, fmt.Errorf("sendChatText: %w", err)
 		}
 		// Xplora sendChatText returns a boolean, not a message ID.
@@ -589,9 +590,9 @@ func fcmMsgTypeToXplora(fcmType string) string {
 // matches a message we recently sent from Matrix, and removes it from the
 // tracker. Returns true if an echo was found.
 // Xplora assigns msg_id = Unix-ms on their end, so the echo's msg_id will be
-// within a couple of seconds of sentAtMs (just network round-trip away).
-// We use a ±2 second window which is precise enough to rule out any Xplora-app
-// message the user independently sent around the same time.
+// very close to sentAtMs (just network round-trip away).
+// Observed deltas: 3–25 ms. We use ±200 ms (8x margin) which makes it
+// practically impossible to accidentally match an Xplora-app message.
 // Entries older than 30 seconds are pruned on every call.
 // The observed delta (fcmMsgID - sentAtMs) is logged at debug level so we can
 // tighten the window over time if real-world data shows it's safe to do so.
@@ -606,7 +607,7 @@ func (c *XploraClient) consumeRecentSent(fcmMsgID int64) bool {
 			continue // expired, drop
 		}
 		delta := fcmMsgID - s.sentAtMs
-		if !found && abs64(delta) <= 2_000 {
+		if !found && abs64(delta) <= 200 {
 			c.log.Debug().
 				Int64("sent_at_ms", s.sentAtMs).
 				Int64("fcm_msg_id", fcmMsgID).
@@ -737,6 +738,7 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 
 	msgs, err := c.gql.GetChats(ctx, wuid, 0, 20, lastMsgID)
 	if err != nil {
+		c.handleAPIError(ctx, err)
 		c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
 		return
 	}
@@ -968,6 +970,28 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 			return info, nil
 		},
 	})
+}
+
+// handleAPIError checks whether err is an Xplora authentication failure
+// (E000004). If so, it attempts a token refresh; if that also fails it sends
+// a BAD_CREDENTIALS bridge state so the user sees it in Matrix immediately,
+// without needing a bridge restart. Returns true if the error was auth-related.
+func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
+	if err == nil || !strings.Contains(err.Error(), "E000004") {
+		return false
+	}
+	c.log.Warn().Err(err).Msg("Xplora auth error detected mid-session, attempting token refresh")
+	if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
+		c.log.Warn().Err(rfErr).Msg("Token refresh failed mid-session")
+		c.userLogin.BridgeState.Send(status.BridgeState{
+			StateEvent: status.StateBadCredentials,
+			Error:      "xplora-auth-error",
+			Message:    "Xplora session expired: " + err.Error(),
+		})
+	} else {
+		c.log.Info().Msg("Token refreshed successfully after mid-session auth error")
+	}
+	return true
 }
 
 // tryRefreshToken exchanges the stored refresh token for a new access token
