@@ -352,7 +352,7 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.recentSentMu.Unlock()
 		if err := c.gql.SendChatText(ctx, meta.WUID, msg.Content.Body); err != nil {
 			// Send failed — remove the pre-recorded entry so it doesn't linger.
-			c.consumeRecentSent(msg.Content.Body)
+			c.consumeRecentSent(msg.Content.Body, time.Now())
 			return nil, fmt.Errorf("sendChatText: %w", err)
 		}
 		// Xplora sendChatText returns a boolean, not a message ID.
@@ -405,7 +405,7 @@ func (c *XploraClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev
 func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 	c.log.Debug().RawJSON("fcm_payload", msg.Raw).Msg("Received FCM push from Xplora")
 
-	if chatMsg, wuid, ok := c.parseFCMPayload(msg.Raw); ok {
+	if chatMsg, wuid, fcmTime, ok := c.parseFCMPayload(msg.Raw); ok {
 		// Determine message direction. The FCM sender field uses a different ID
 		// format than c.meta.UserID (from readMyInfo), so we can't compare them
 		// directly. Instead we check whether the sender is the known child:
@@ -426,7 +426,7 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		// recent send and will pass through normally.)
 		if isFromMe {
 			text := ""
-			if err := json.Unmarshal(chatMsg.Data, &text); err == nil && c.consumeRecentSent(text) {
+			if err := json.Unmarshal(chatMsg.Data, &text); err == nil && c.consumeRecentSent(text, fcmTime) {
 				c.log.Debug().Str("wuid", wuid).Str("msg_id", chatMsg.MsgID).Msg("FCM: suppressing echo of recently sent message")
 				c.updateLastMsgID(wuid, chatMsg.MsgID)
 				return
@@ -443,9 +443,10 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 }
 
 // parseFCMPayload parses an Xplora FCM push notification payload.
-// Returns the synthetic ChatMessage, the target watch UID, and true on success.
-// The wuid is determined by matching sender/receiver against known children.
-func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, bool) {
+// Returns the synthetic ChatMessage, the target watch UID, the FCM message
+// timestamp, and true on success. The wuid is determined by matching
+// sender/receiver against known children.
+func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, time.Time, bool) {
 	var envelope struct {
 		Content *struct {
 			MsgID    int64  `json:"msg_id"`
@@ -457,11 +458,11 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", time.Time{}, false
 	}
 	ct := envelope.Content
 	if ct.MsgID == 0 || ct.MsgType == "" {
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", time.Time{}, false
 	}
 
 	// Emoticon FCM payloads may or may not include emoticon_id.
@@ -476,7 +477,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			rawContent = envelope2.Content
 		}
 		c.log.Debug().RawJSON("fcm_emoticon_content", rawContent).Msg("FCM chat_emoticon payload (falling back to poll)")
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", time.Time{}, false
 	}
 
 	// Identify the watch UID: the child's ID is either the receiver
@@ -517,7 +518,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Str("receiver", ct.Receiver).
 			Strs("known_child_uids", knownUIDs).
 			Msg("FCM direct parse: could not match sender/receiver to a known child")
-		return xplora.ChatMessage{}, "", false
+		return xplora.ChatMessage{}, "", time.Time{}, false
 	}
 	// Learn the child's FCM user ID if we don't have it yet.
 	// In a parent→child message the receiver IS the child's FCM account ID.
@@ -553,6 +554,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 
 	// FCM time is Unix milliseconds; convert to seconds to match chatsNew.
 	createSec := ct.Time / 1000
+	fcmTime := time.UnixMilli(ct.Time)
 
 	return xplora.ChatMessage{
 		ID:     msgIDStr,
@@ -561,7 +563,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		Sender: senderRef,
 		Data:   dataJSON,
 		Create: &createSec,
-	}, wuid, true
+	}, wuid, fcmTime, true
 }
 
 // fcmMsgTypeToXplora maps an FCM msg_type value to the Xplora API type label
@@ -583,8 +585,11 @@ func fcmMsgTypeToXplora(fcmType string) string {
 
 // consumeRecentSent checks whether text matches a message we recently sent from
 // Matrix and removes it from the tracker. Returns true if an echo was found.
-// The window is 10 seconds; expired entries are pruned on every call.
-func (c *XploraClient) consumeRecentSent(text string) bool {
+// Entries older than 10 seconds are pruned on every call.
+// fcmTime is the timestamp from the FCM payload; we require it to be within
+// 8 seconds of sentAt to avoid suppressing messages sent from the Xplora app
+// that happen to have the same text as a recently bridged Matrix message.
+func (c *XploraClient) consumeRecentSent(text string, fcmTime time.Time) bool {
 	c.recentSentMu.Lock()
 	defer c.recentSentMu.Unlock()
 	now := time.Now()
@@ -595,6 +600,13 @@ func (c *XploraClient) consumeRecentSent(text string) bool {
 			continue // expired, drop
 		}
 		if !found && s.text == text {
+			delta := fcmTime.Sub(s.sentAt)
+			if delta < -2*time.Second || delta > 8*time.Second {
+				// FCM time is too far from when we sent — likely a coincidental
+				// text match from the Xplora app, not an echo of our send.
+				kept = append(kept, s)
+				continue
+			}
 			found = true
 			continue // consume this entry
 		}
