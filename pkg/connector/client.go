@@ -232,19 +232,31 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	// NeedsRefresh() is a local check (no API call); it returns true when the
 	// token expires within 1 hour, so a 30-minute ticker always catches it
 	// with at least 30 minutes to spare.
+	//
+	// Every 10 minutes we also call GetMyInfo as a lightweight session health
+	// check. This detects mid-session invalidation (e.g. user logged in on
+	// another device) within 10 minutes without waiting for a bridge restart
+	// or an outgoing message. 6 calls/hour is well within acceptable API use.
 	go func() {
-		ticker := time.NewTicker(30 * time.Minute)
-		defer ticker.Stop()
+		refreshTicker := time.NewTicker(30 * time.Minute)
+		healthTicker := time.NewTicker(10 * time.Minute)
+		defer refreshTicker.Stop()
+		defer healthTicker.Stop()
 		for {
 			select {
 			case <-fcmCtx.Done():
 				return
-			case <-ticker.C:
+			case <-refreshTicker.C:
 				if c.auth.NeedsRefresh() {
 					c.log.Info().Msg("Proactive token refresh triggered")
 					if err := c.tryRefreshToken(fcmCtx); err != nil {
 						c.log.Warn().Err(err).Msg("Proactive token refresh failed")
 					}
+				}
+			case <-healthTicker.C:
+				if _, err := c.gql.GetMyInfo(fcmCtx); err != nil {
+					c.log.Warn().Err(err).Msg("Session health check failed")
+					c.handleAPIError(fcmCtx, err)
 				}
 			}
 		}
