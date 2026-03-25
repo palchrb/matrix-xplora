@@ -590,6 +590,8 @@ func fcmMsgTypeToXplora(fcmType string) string {
 // We use a ±2 second window which is precise enough to rule out any Xplora-app
 // message the user independently sent around the same time.
 // Entries older than 30 seconds are pruned on every call.
+// The observed delta (fcmMsgID - sentAtMs) is logged at debug level so we can
+// tighten the window over time if real-world data shows it's safe to do so.
 func (c *XploraClient) consumeRecentSent(fcmMsgID int64) bool {
 	c.recentSentMu.Lock()
 	defer c.recentSentMu.Unlock()
@@ -600,7 +602,13 @@ func (c *XploraClient) consumeRecentSent(fcmMsgID int64) bool {
 		if nowMs-s.sentAtMs > 30_000 {
 			continue // expired, drop
 		}
-		if !found && abs64(fcmMsgID-s.sentAtMs) <= 2_000 {
+		delta := fcmMsgID - s.sentAtMs
+		if !found && abs64(delta) <= 2_000 {
+			c.log.Debug().
+				Int64("sent_at_ms", s.sentAtMs).
+				Int64("fcm_msg_id", fcmMsgID).
+				Int64("delta_ms", delta).
+				Msg("FCM echo delta (matrix sentAtMs → fcm msg_id)")
 			found = true
 			continue // consume this entry
 		}
