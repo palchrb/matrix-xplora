@@ -982,7 +982,8 @@ func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
 	}
 	c.log.Warn().Err(err).Msg("Xplora auth error detected mid-session, attempting token refresh")
 	if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
-		c.log.Warn().Err(rfErr).Msg("Token refresh failed mid-session")
+		c.log.Warn().Err(rfErr).Msg("Token refresh failed mid-session, stopping polling")
+		c.stopPolling()
 		c.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateBadCredentials,
 			Error:      "xplora-auth-error",
