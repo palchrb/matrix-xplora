@@ -224,6 +224,29 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			}
 		}
 	}()
+
+	// Proactively refresh the token every 30 minutes so it never expires
+	// silently during long-running sessions without messages or restarts.
+	// NeedsRefresh() is a local check (no API call); it returns true when the
+	// token expires within 1 hour, so a 30-minute ticker always catches it
+	// with at least 30 minutes to spare.
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-fcmCtx.Done():
+				return
+			case <-ticker.C:
+				if c.auth.NeedsRefresh() {
+					c.log.Info().Msg("Proactive token refresh triggered")
+					if err := c.tryRefreshToken(fcmCtx); err != nil {
+						c.log.Warn().Err(err).Msg("Proactive token refresh failed")
+					}
+				}
+			}
+		}
+	}()
 }
 
 // Disconnect stops background goroutines cleanly.

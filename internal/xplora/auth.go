@@ -89,7 +89,7 @@ func (a *Auth) RefreshToken() string {
 	return a.creds.RefreshToken
 }
 
-// NeedsRefresh returns true if the token is expired or will expire within 5 minutes.
+// NeedsRefresh returns true if the token is expired or will expire within 1 hour.
 // Returns false if the expiry date cannot be parsed (assume still valid).
 // expireDate may arrive as RFC3339 ("2026-03-25T10:00:00Z"), Unix-seconds
 // ("1777450741"), or Unix-milliseconds ("1777450741000") — all are handled.
@@ -114,7 +114,7 @@ func (a *Auth) NeedsRefresh() bool {
 			return false
 		}
 	}
-	return time.Until(expiry) < 5*time.Minute
+	return time.Until(expiry) < time.Hour
 }
 
 // SetCredentials stores new credentials in memory and saves them to disk.
