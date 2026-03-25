@@ -96,7 +96,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	myInfo, err := c.gql.GetMyInfo(ctx)
 	if err != nil {
 		// Token may have expired mid-session; try refreshing once before giving up.
+		c.log.Warn().Err(err).Msg("GetMyInfo failed, attempting token refresh")
 		if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
+			c.log.Warn().Err(rfErr).Msg("Token refresh failed, giving up")
 			c.userLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateBadCredentials,
 				Error:      "xplora-auth-error",
@@ -107,6 +109,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		var err2 error
 		myInfo, err2 = c.gql.GetMyInfo(ctx)
 		if err2 != nil {
+			c.log.Warn().Err(err2).Msg("GetMyInfo failed after token refresh")
 			c.userLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateBadCredentials,
 				Error:      "xplora-auth-error",
