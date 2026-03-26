@@ -547,9 +547,11 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		return
 	}
 
-	// Unknown payload type — fall back to polling so nothing is lost.
-	ctx := c.userLogin.Log.WithContext(context.Background())
-	c.pollAllWatches(ctx)
+	// Unknown payload type — log the raw payload for investigation and skip
+	// polling. Triggering pollAllWatches for every unknown FCM push (e.g.
+	// location updates) would cause unnecessary API traffic. Chat messages
+	// we care about are handled explicitly above.
+	c.log.Warn().RawJSON("fcm_payload", msg.Raw).Msg("FCM: unhandled payload type, skipping poll")
 }
 
 // parseFCMPayload parses an Xplora FCM push notification payload.
