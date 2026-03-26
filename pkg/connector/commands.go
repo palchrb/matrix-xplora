@@ -7,6 +7,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/event"
 )
 
 // RegisterCommands registers Xplora-specific bot commands with the bridge processor.
@@ -21,7 +22,7 @@ var cmdLocate = &commands.FullHandler{
 	RequiresPortal: true,
 	Help: commands.HelpMeta{
 		Section:     commands.HelpSectionChats,
-		Description: "Request the current GPS location of the linked watch and return a map link.",
+		Description: "Request the current GPS location of the linked watch.",
 	},
 	Func: func(ce *commands.Event) {
 		meta, ok := ce.Portal.Metadata.(*PortalMetadata)
@@ -63,20 +64,31 @@ var cmdLocate = &commands.FullHandler{
 			ts = time.Unix(loc.Tm, 0)
 		}
 
-		mapsURL := fmt.Sprintf("https://maps.google.com/?q=%.6f,%.6f", loc.Lat, loc.Lng)
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "📍 [Open in Google Maps](%s)\n", mapsURL)
-		fmt.Fprintf(&sb, "_As of %s_\n", ts.Format("15:04, 2 Jan 2006"))
+		// Send as a native Matrix location event. Element renders this as an
+		// interactive map with a pin. The body acts as fallback text for
+		// clients that don't support m.location.
+		geoURI := fmt.Sprintf("geo:%.6f,%.6f", loc.Lat, loc.Lng)
+		var bodyParts []string
 		if loc.Addr != "" {
-			fmt.Fprintf(&sb, "%s\n", loc.Addr)
+			bodyParts = append(bodyParts, loc.Addr)
+		} else {
+			bodyParts = append(bodyParts, fmt.Sprintf("%.6f, %.6f", loc.Lat, loc.Lng))
 		}
+		bodyParts = append(bodyParts, ts.Format("15:04, 2 Jan 2006"))
 		if loc.Battery > 0 {
 			if loc.IsCharging {
-				fmt.Fprintf(&sb, "🔋 Battery: %d%% ⚡", loc.Battery)
+				bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%% ⚡", loc.Battery))
 			} else {
-				fmt.Fprintf(&sb, "🔋 Battery: %d%%", loc.Battery)
+				bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%%", loc.Battery))
 			}
 		}
-		ce.Reply(strings.TrimRight(sb.String(), "\n"))
+
+		_, _ = ce.Bot.SendMessage(ce.Ctx, ce.Portal.MXID, event.EventMessage, &event.Content{
+			Parsed: &event.MessageEventContent{
+				MsgType: event.MsgLocation,
+				Body:    strings.Join(bodyParts, " — "),
+				GeoURI:  geoURI,
+			},
+		}, nil)
 	},
 }

@@ -73,6 +73,12 @@ func (c *XploraClient) convertChatMessage(
 			part.Extra = extra
 			return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}, nil
 		}
+
+	case "TRACKER_UPDATE":
+		if part := convertLocationUpdate(msg, extra); part != nil {
+			return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}, nil
+		}
+		// Fall through to text path if parsing fails.
 	}
 
 	body := extractMessageText(msg)
@@ -86,6 +92,36 @@ func (c *XploraClient) convertChatMessage(
 			Extra: extra,
 		}},
 	}, nil
+}
+
+// convertLocationUpdate parses a TRACKER_UPDATE chat message and returns an
+// m.location event part. Returns nil if lat/lng cannot be parsed.
+func convertLocationUpdate(msg xplora.ChatMessage, extra map[string]any) *bridgev2.ConvertedMessagePart {
+	if len(msg.Data) == 0 || string(msg.Data) == "null" {
+		return nil
+	}
+	var loc struct {
+		Lat  float64 `json:"lat"`
+		Lng  float64 `json:"lng"`
+		Addr string  `json:"addr"`
+	}
+	if err := json.Unmarshal(msg.Data, &loc); err != nil || (loc.Lat == 0 && loc.Lng == 0) {
+		return nil
+	}
+	geoURI := fmt.Sprintf("geo:%.6f,%.6f", loc.Lat, loc.Lng)
+	body := loc.Addr
+	if body == "" {
+		body = fmt.Sprintf("%.6f, %.6f", loc.Lat, loc.Lng)
+	}
+	return &bridgev2.ConvertedMessagePart{
+		Type: event.EventMessage,
+		Content: &event.MessageEventContent{
+			MsgType: event.MsgLocation,
+			Body:    body,
+			GeoURI:  geoURI,
+		},
+		Extra: extra,
+	}
 }
 
 // bridgeIncomingMedia fetches an image or voice message from the Xplora CDN
