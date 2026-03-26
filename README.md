@@ -4,7 +4,7 @@ A Matrix bridge for the [Xplora](https://www.xplora.eu/) children's smartwatch p
 
 Bridges the Xplora parent app chat to Matrix, so you can message your child's watch from any Matrix client. One Matrix room per watch.
 
-Would like to highlight that I have picked pieces from https://github.com/Ludy87/pyxplora_api, and added a bit more here and there
+Would like to highlight that I have picked pieces from https://github.com/Ludy87/pyxplora_api, and added a bit more here and there. It receives FCM push messages from xplora by registering as an android client.
 
 ## Status
 
