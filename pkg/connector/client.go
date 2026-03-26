@@ -204,6 +204,12 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	fcmCtx, fcmCancel := context.WithCancel(context.Background())
 	c.fcmCancel = fcmCancel
 
+	// Catch-up poll: fetch any messages that arrived while the bridge was
+	// offline. pollWatch uses LastMsgID as a cursor, so only new messages
+	// are dispatched. bridgev2 deduplicates by message ID, so any messages
+	// already in the Matrix room won't be duplicated.
+	go c.pollAllWatches(fcmCtx)
+
 	// Start FCM listener in background with exponential backoff.
 	go func() {
 		defer fcmCancel()
