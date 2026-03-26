@@ -204,6 +204,12 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	fcmCtx, fcmCancel := context.WithCancel(context.Background())
 	c.fcmCancel = fcmCancel
 
+	// Catch-up poll: fetch any messages that arrived while the bridge was
+	// offline. pollWatch uses LastMsgID as a cursor, so only new messages
+	// are dispatched. bridgev2 deduplicates by message ID, so any messages
+	// already in the Matrix room won't be duplicated.
+	go c.pollAllWatches(fcmCtx)
+
 	// Start FCM listener in background with exponential backoff.
 	go func() {
 		defer fcmCancel()
@@ -547,9 +553,11 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		return
 	}
 
-	// Unknown payload type — fall back to polling so nothing is lost.
-	ctx := c.userLogin.Log.WithContext(context.Background())
-	c.pollAllWatches(ctx)
+	// Unknown payload type — log the raw payload for investigation and skip
+	// polling. Triggering pollAllWatches for every unknown FCM push (e.g.
+	// location updates) would cause unnecessary API traffic. Chat messages
+	// we care about are handled explicitly above.
+	c.log.Warn().RawJSON("fcm_payload", msg.Raw).Msg("FCM: unhandled payload type, skipping poll")
 }
 
 // parseFCMPayload parses an Xplora FCM push notification payload.
