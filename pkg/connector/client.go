@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"github.com/palchrb/matrix-xplora/internal/fcm"
@@ -408,6 +410,9 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			params = xplora.SendChatMsgParams{Type: "EMOTICON", EmoticonID: emoticonID}
 		} else {
 			params = xplora.SendChatMsgParams{Type: "TEXT", Text: msg.Content.Body}
+			if looksLikeSingleEmoji(msg.Content.Body) {
+				go c.sendEmojiNotice(msg.Portal.MXID, msg.Content.Body)
+			}
 		}
 
 	case event.MsgImage:
@@ -488,6 +493,52 @@ func (c *XploraClient) downloadMatrixMedia(ctx context.Context, msg *bridgev2.Ma
 
 // mimeTypeToFormat converts a MIME type to the format string Xplora expects
 // in the sendChatMsg IMAGE mutation (e.g. "image/jpeg" → "jpg").
+// looksLikeSingleEmoji returns true when s appears to be a single emoji
+// (or a short ZWJ sequence) rather than normal text. Heuristic: no spaces,
+// at most 8 runes, and at least one codepoint ≥ U+2600 (where emoji live).
+func looksLikeSingleEmoji(s string) bool {
+	if strings.ContainsRune(s, ' ') || utf8.RuneCountInString(s) > 8 {
+		return false
+	}
+	for _, r := range s {
+		if r >= 0x2600 {
+			return true
+		}
+	}
+	return false
+}
+
+// sendEmojiNotice sends an m.notice to the Matrix room informing the user
+// that the emoji they sent is not a native Xplora sticker and lists the ones
+// that are. Intended to be called in a goroutine from HandleMatrixMessage.
+func (c *XploraClient) sendEmojiNotice(roomID id.RoomID, emoji string) {
+	keys := make([]int, 0, len(xploraEmoticonMap))
+	for k := range xploraEmoticonMap {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	seen := map[string]bool{}
+	stickers := make([]string, 0, len(keys))
+	for _, k := range keys {
+		e := xploraEmoticonMap[k]
+		if !seen[e] {
+			stickers = append(stickers, e)
+			seen[e] = true
+		}
+	}
+	body := fmt.Sprintf(
+		"Note: %s is not a native Xplora sticker — sent as text, may not display on the watch.\nSupported stickers: %s",
+		emoji, strings.Join(stickers, " "),
+	)
+	ctx := context.Background()
+	_, _ = c.connector.br.Bot.SendMessage(ctx, roomID, event.EventMessage, &event.Content{
+		Parsed: &event.MessageEventContent{
+			MsgType: event.MsgNotice,
+			Body:    body,
+		},
+	}, nil)
+}
+
 func mimeTypeToFormat(mimeType string) string {
 	switch mimeType {
 	case "image/jpeg", "image/jpg":
