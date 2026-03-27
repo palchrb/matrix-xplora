@@ -6,6 +6,7 @@ package xplora
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // flexString unmarshals a JSON value that may be either a string or a number,
@@ -27,6 +28,31 @@ func (f *flexString) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return fmt.Errorf("flexString: cannot unmarshal %s", string(data))
+}
+
+// flexFloat64 unmarshals a JSON value that may be either a number or a quoted
+// string containing a decimal number. The Xplora watchLastLocate query returns
+// lat/lng as JSON strings (e.g. "59.807646") rather than numbers.
+type flexFloat64 float64
+
+func (f *flexFloat64) UnmarshalJSON(data []byte) error {
+	// Try plain number first.
+	var v float64
+	if err := json.Unmarshal(data, &v); err == nil {
+		*f = flexFloat64(v)
+		return nil
+	}
+	// Fall back to quoted string.
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("flexFloat64: cannot unmarshal %s", string(data))
+	}
+	parsed, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("flexFloat64: cannot parse %q as float: %w", s, err)
+	}
+	*f = flexFloat64(parsed)
+	return nil
 }
 
 // AuthResponse is returned by the signInWithEmailOrPhone mutation.
@@ -143,9 +169,9 @@ type ChatsResponse struct {
 // Tm is a Unix timestamp (seconds or milliseconds depending on API version).
 // Lat/Lng are decimal degrees. Battery is a percentage 0–100.
 type LocationInfo struct {
-	Tm         int64   `json:"tm"`
-	Lat        float64 `json:"lat"`
-	Lng        float64 `json:"lng"`
+	Tm         int64        `json:"tm"`
+	Lat        flexFloat64  `json:"lat"`
+	Lng        flexFloat64  `json:"lng"`
 	Addr       string  `json:"addr"`
 	Poi        string  `json:"poi"`
 	City       string  `json:"city"`
