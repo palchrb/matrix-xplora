@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
+	"strings"
 )
 
 // ToXploraAMR transcodes any audio to AMR-NB (what Xplora watches expect).
@@ -124,9 +125,14 @@ func ExtractWaveformAndDuration(ctx context.Context, data []byte, srcFormat stri
 }
 
 // mimeToFFmpegFormat maps common audio MIME types to ffmpeg demuxer names.
+// Codec parameters (e.g. "; codecs=opus") are stripped before matching so
+// that MIME types like "audio/webm; codecs=opus" are handled correctly.
 func mimeToFFmpegFormat(mime string) (string, error) {
+	if idx := strings.IndexByte(mime, ';'); idx >= 0 {
+		mime = strings.TrimSpace(mime[:idx])
+	}
 	switch mime {
-	case "audio/ogg", "audio/ogg; codecs=vorbis", "audio/ogg; codecs=opus":
+	case "audio/ogg":
 		return "ogg", nil
 	case "audio/mpeg", "audio/mp3":
 		return "mp3", nil
@@ -140,5 +146,54 @@ func mimeToFFmpegFormat(mime string) (string, error) {
 		return "amr", nil
 	default:
 		return "", fmt.Errorf("unsupported audio type: %s", mime)
+	}
+}
+
+// AMRNBDurationSec returns the duration of an AMR-NB file in whole seconds by
+// walking its frame headers. Each frame is 20ms; the mode byte encodes size.
+// Returns 0 if the data is not a valid AMR-NB file or is too short to measure.
+func AMRNBDurationSec(data []byte) int {
+	const magic = "#!AMR\n"
+	if len(data) < len(magic) || string(data[:len(magic)]) != magic {
+		return 0
+	}
+	frames := 0
+	i := len(magic)
+	for i < len(data) {
+		ft := (data[i] >> 3) & 0x0F // frame type in bits 3–6
+		size := amrFrameSize(ft)
+		if size == 0 {
+			break
+		}
+		frames++
+		i += size
+	}
+	return frames * 20 / 1000 // 20 ms per frame → seconds
+}
+
+// amrFrameSize returns the total byte length of an AMR-NB frame (1-byte header
+// + data bytes) for the given Frame Type (FT). Per 3GPP TS 26.101.
+func amrFrameSize(ft byte) int {
+	switch ft {
+	case 0:
+		return 13 // MR475
+	case 1:
+		return 14 // MR515
+	case 2:
+		return 16 // MR59
+	case 3:
+		return 18 // MR67
+	case 4:
+		return 20 // MR74
+	case 5:
+		return 21 // MR795
+	case 6:
+		return 27 // MR102
+	case 7:
+		return 32 // MR122
+	case 8:
+		return 6 // SID (comfort noise)
+	default:
+		return 0 // NO_DATA or unknown — stop walking
 	}
 }
