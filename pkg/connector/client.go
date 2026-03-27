@@ -439,7 +439,21 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			c.log.Warn().Err(transcodeErr).Str("mime", srcMIME).Msg("Audio→AMR transcode failed, sending raw")
 			amrData = data
 		}
-		durationSec := msg.Content.GetInfo().Duration / 1000
+		// Derive duration from the actual AMR frame count — frame-accurate and
+		// client-agnostic (web clients like gomuks omit info.duration; clients
+		// that do set it may be wrong if ffmpeg trimmed the audio to -t 60).
+		durationSec := AMRNBDurationSec(amrData)
+		if durationSec == 0 {
+			// AMR frame parse failed (e.g. transcode fell back to raw data).
+			// Use client-reported duration as last resort.
+			durationSec = msg.Content.GetInfo().Duration / 1000
+		}
+		c.log.Debug().
+			Str("src_mime", srcMIME).
+			Int("src_bytes", len(data)).
+			Int("amr_bytes", len(amrData)).
+			Int("duration_sec", durationSec).
+			Msg("Sending voice message to Xplora")
 		params = xplora.SendChatMsgParams{
 			Type:     "VOICE",
 			Body:     base64.StdEncoding.EncodeToString(amrData),
