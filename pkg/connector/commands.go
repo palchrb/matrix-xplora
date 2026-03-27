@@ -2,6 +2,7 @@ package connector
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 // Called from main.go via BridgeMain.PostInit after the bridge is initialised.
 func RegisterCommands(br *bridgev2.Bridge) {
 	br.Commands.(*commands.Processor).AddHandler(cmdLocate)
+	br.Commands.(*commands.Processor).AddHandler(cmdStickers)
 }
 
 var cmdLocate = &commands.FullHandler{
@@ -90,5 +92,33 @@ var cmdLocate = &commands.FullHandler{
 				GeoURI:  geoURI,
 			},
 		}, nil)
+	},
+}
+
+var cmdStickers = &commands.FullHandler{
+	Name:           "stickers",
+	RequiresLogin:  false,
+	RequiresPortal: false,
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionUnclassified,
+		Description: "List native Xplora stickers you can send from Matrix.",
+	},
+	Func: func(ce *commands.Event) {
+		keys := make([]int, 0, len(xploraEmoticonMap))
+		for k := range xploraEmoticonMap {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		seen := map[string]bool{}
+		stickers := make([]string, 0, len(keys))
+		for _, k := range keys {
+			e := xploraEmoticonMap[k]
+			if !seen[e] {
+				stickers = append(stickers, e)
+				seen[e] = true
+			}
+		}
+		ce.Reply("Native Xplora stickers — send one of these as a single emoji:\n%s",
+			strings.Join(stickers, " "))
 	},
 }
