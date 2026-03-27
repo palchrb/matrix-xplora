@@ -2,9 +2,9 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -138,26 +138,32 @@ func (c *XploraClient) bridgeIncomingMedia(
 		return nil, fmt.Errorf("portal has no WUID")
 	}
 
-	var mediaURL string
-	var err error
+	// FetchChatImage / FetchChatVoice return base64-encoded binary data,
+	// not an HTTP URL. Decode the payload directly.
+	var b64data string
+	var fetchErr error
 	switch msgType {
 	case "IMAGE":
-		mediaURL, err = c.gql.FetchChatImage(ctx, meta.WUID, msg.MsgID)
+		b64data, fetchErr = c.gql.FetchChatImage(ctx, meta.WUID, msg.MsgID)
 	case "VOICE":
-		mediaURL, err = c.gql.FetchChatVoice(ctx, meta.WUID, msg.MsgID)
+		b64data, fetchErr = c.gql.FetchChatVoice(ctx, meta.WUID, msg.MsgID)
 	default:
 		return nil, fmt.Errorf("unsupported media type: %s", msgType)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch media URL: %w", err)
+	if fetchErr != nil {
+		return nil, fmt.Errorf("fetch media data: %w", fetchErr)
 	}
-	if mediaURL == "" {
-		return nil, fmt.Errorf("empty media URL returned by API")
+	if b64data == "" {
+		return nil, fmt.Errorf("empty media data returned by API")
 	}
 
-	data, err := downloadURL(ctx, mediaURL)
+	data, err := base64.StdEncoding.DecodeString(b64data)
 	if err != nil {
-		return nil, fmt.Errorf("download from %s: %w", mediaURL, err)
+		// Try RawStdEncoding (no padding) as a fallback.
+		data, err = base64.RawStdEncoding.DecodeString(b64data)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64 media data: %w", err)
+		}
 	}
 
 	// Detect MIME type from content; fall back to sensible defaults.
@@ -206,22 +212,6 @@ func (c *XploraClient) bridgeIncomingMedia(
 	}, nil
 }
 
-// downloadURL fetches the contents of a URL using a context-aware GET request.
-func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from media server", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
-}
 
 // extractMessageText parses the `data` JSON value from the Xplora API response.
 // data can be a JSON string, a JSON object with a "text" field, or absent.

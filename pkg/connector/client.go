@@ -318,10 +318,16 @@ func (c *XploraClient) LogoutRemote(_ context.Context) {
 }
 
 // GetCapabilities returns Matrix room feature limits for Xplora.
-// Xplora v1 supports text messages only.
 func (c *XploraClient) GetCapabilities(_ context.Context, _ *bridgev2.Portal) *event.RoomFeatures {
+	anyMime := map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported}
 	return &event.RoomFeatures{
-		MaxTextLength: 1000, // Xplora limit TBD; update after API testing
+		MaxTextLength: 1000,
+		File: event.FileFeatureMap{
+			event.MsgImage:     {MimeTypes: anyMime},
+			event.MsgAudio:     {MimeTypes: anyMime},
+			event.CapMsgVoice:  {MimeTypes: anyMime},
+			event.MsgVideo:     {MimeTypes: anyMime},
+		},
 	}
 }
 
@@ -566,12 +572,16 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, int64, bool) {
 	var envelope struct {
 		Content *struct {
-			MsgID    int64  `json:"msg_id"`
-			MsgType  string `json:"msg_type"`
-			Receiver string `json:"receiver"`
-			Sender   string `json:"sender"`
-			Text     string `json:"text"`
-			Time     int64  `json:"time"`
+			MsgID    int64   `json:"msg_id"`
+			MsgType  string  `json:"msg_type"`
+			Receiver string  `json:"receiver"`
+			Sender   string  `json:"sender"`
+			Text     string  `json:"text"`
+			Time     int64   `json:"time"`
+			// Location fields present in location_update payloads.
+			Lat      float64 `json:"lat"`
+			Lng      float64 `json:"lng"`
+			Addr     string  `json:"addr"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
@@ -582,19 +592,64 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		return xplora.ChatMessage{}, "", 0, false
 	}
 
-	// Emoticon FCM payloads may or may not include emoticon_id.
-	// Log the full raw content so we can inspect what fields are present,
-	// then fall back to polling which fetches the full data via chatsNew.
+	// Emoticon FCM payloads include an emoticon_id field in the content.
+	// Parse it directly and build a ChatMessage with EMOTICON type so the
+	// emoji is rendered correctly on the Matrix side via formatEmoticon.
 	if ct.MsgType == "chat_emoticon" {
-		var rawContent json.RawMessage
-		var envelope2 struct {
-			Content json.RawMessage `json:"content"`
+		var emoticonEnv struct {
+			Content struct {
+				MsgID      int64 `json:"msg_id"`
+				EmoticonID any   `json:"emoticon_id"` // int or string
+				Time       int64 `json:"time"`
+				Sender     string `json:"sender"`
+				Receiver   string `json:"receiver"`
+			} `json:"content"`
 		}
-		if err := json.Unmarshal(raw, &envelope2); err == nil {
-			rawContent = envelope2.Content
+		if err := json.Unmarshal(raw, &emoticonEnv); err != nil || emoticonEnv.Content.MsgID == 0 {
+			c.log.Warn().RawJSON("fcm_payload", raw).Msg("FCM chat_emoticon: cannot parse payload, dropping")
+			return xplora.ChatMessage{}, "", 0, false
 		}
-		c.log.Debug().RawJSON("fcm_emoticon_content", rawContent).Msg("FCM chat_emoticon payload (falling back to poll)")
-		return xplora.ChatMessage{}, "", 0, false
+		ec := emoticonEnv.Content
+		// Re-use the already-parsed wuid detection below by temporarily
+		// setting the envelope content fields.
+		ct.MsgID = ec.MsgID
+		ct.Sender = ec.Sender
+		ct.Receiver = ec.Receiver
+		ct.Time = ec.Time
+		// Build data JSON as {"emoticon_id": <value>} for formatEmoticon.
+		dataJSON, _ := json.Marshal(map[string]any{"emoticon_id": ec.EmoticonID})
+		msgType := "EMOTICON"
+		msgIDStr := fmt.Sprintf("%d", ec.MsgID)
+		createSec := ec.Time / 1000
+		// Resolve wuid using the same logic as the main path.
+		wuid := ""
+		for _, w := range c.meta.Children {
+			childUID := w.ChildUID()
+			if ec.Receiver == childUID || ec.Sender == childUID ||
+				(w.FCMID != "" && (ec.Receiver == w.FCMID || ec.Sender == w.FCMID)) {
+				wuid = childUID
+				break
+			}
+		}
+		if wuid == "" && len(c.meta.Children) == 1 {
+			wuid = c.meta.Children[0].ChildUID()
+		}
+		if wuid == "" {
+			c.log.Warn().RawJSON("fcm_payload", raw).Msg("FCM chat_emoticon: cannot match to child, dropping")
+			return xplora.ChatMessage{}, "", 0, false
+		}
+		var senderRef *xplora.UserRef
+		if ec.Sender != "" {
+			senderRef = &xplora.UserRef{ID: ec.Sender}
+		}
+		return xplora.ChatMessage{
+			ID:     msgIDStr,
+			MsgID:  msgIDStr,
+			Type:   &msgType,
+			Sender: senderRef,
+			Data:   dataJSON,
+			Create: &createSec,
+		}, wuid, ec.MsgID, true
 	}
 
 	// Identify the watch UID: the child's ID is either the receiver
@@ -658,9 +713,17 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	msgIDStr := fmt.Sprintf("%d", ct.MsgID)
 	msgType := fcmMsgTypeToXplora(ct.MsgType)
 
-	// Encode text as a JSON string so extractMessageText can parse it.
+	// Build the Data JSON payload that convertChatMessage / extractMessageText
+	// will parse. For location_update, embed lat/lng/addr so convertLocationUpdate
+	// can produce an m.location event. For other types, encode the text field.
 	var dataJSON json.RawMessage
-	if ct.Text != "" {
+	if ct.MsgType == "location_update" && (ct.Lat != 0 || ct.Lng != 0) {
+		dataJSON, _ = json.Marshal(map[string]any{
+			"lat":  ct.Lat,
+			"lng":  ct.Lng,
+			"addr": ct.Addr,
+		})
+	} else if ct.Text != "" {
 		dataJSON, _ = json.Marshal(ct.Text)
 	}
 
@@ -693,6 +756,8 @@ func fcmMsgTypeToXplora(fcmType string) string {
 		return "VOICE"
 	case "chat_emoticon":
 		return "EMOTICON"
+	case "location_update":
+		return "TRACKER_UPDATE"
 	default:
 		return fcmType
 	}
