@@ -18,7 +18,7 @@ FROM alpine:3.23
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache su-exec ca-certificates bash yq-go
+RUN apk add --no-cache su-exec ca-certificates bash yq-go ffmpeg
 
 COPY --from=builder /build/mautrix-xplora /usr/bin/mautrix-xplora
 COPY --from=builder /build/fcm-probe /usr/bin/fcm-probe
