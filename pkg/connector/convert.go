@@ -179,9 +179,15 @@ func (c *XploraClient) bridgeIncomingMedia(
 		}
 	case "VOICE":
 		mxMsgType = event.MsgAudio
-		filename = "voice.amr"
-		if !strings.HasPrefix(mimeType, "audio/") {
+		oggData, transcodeErr := FromXploraAMR(ctx, data)
+		if transcodeErr != nil {
+			c.log.Warn().Err(transcodeErr).Msg("AMR→OGG transcode failed, uploading raw AMR")
+			filename = "voice.amr"
 			mimeType = "audio/amr"
+		} else {
+			data = oggData
+			filename = "voice.ogg"
+			mimeType = "audio/ogg"
 		}
 	}
 
@@ -201,9 +207,17 @@ func (c *XploraClient) bridgeIncomingMedia(
 		},
 	}
 	if mxMsgType == event.MsgAudio {
-		// Mark as voice message per MSC3245. Duration unknown until format is confirmed.
 		content.MSC3245Voice = &event.MSC3245Voice{}
-		content.MSC1767Audio = &event.MSC1767Audio{Waveform: []int{}}
+		if mimeType == "audio/ogg" {
+			waveform, durationMS := ExtractWaveformAndDuration(ctx, data, "ogg")
+			content.Info.Duration = durationMS
+			content.MSC1767Audio = &event.MSC1767Audio{
+				Duration: durationMS,
+				Waveform: waveform,
+			}
+		} else {
+			content.MSC1767Audio = &event.MSC1767Audio{Waveform: []int{}}
+		}
 	}
 
 	return &bridgev2.ConvertedMessagePart{
@@ -211,7 +225,6 @@ func (c *XploraClient) bridgeIncomingMedia(
 		Content: content,
 	}, nil
 }
-
 
 // extractMessageText parses the `data` JSON value from the Xplora API response.
 // data can be a JSON string, a JSON object with a "text" field, or absent.

@@ -14,9 +14,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/rs/zerolog"
 	"github.com/palchrb/matrix-xplora/internal/fcm"
 	"github.com/palchrb/matrix-xplora/internal/xplora"
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -325,10 +325,10 @@ func (c *XploraClient) GetCapabilities(_ context.Context, _ *bridgev2.Portal) *e
 	return &event.RoomFeatures{
 		MaxTextLength: 1000,
 		File: event.FileFeatureMap{
-			event.MsgImage:     {MimeTypes: anyMime},
-			event.MsgAudio:     {MimeTypes: anyMime},
-			event.CapMsgVoice:  {MimeTypes: anyMime},
-			event.MsgVideo:     {MimeTypes: anyMime},
+			event.MsgImage:    {MimeTypes: anyMime},
+			event.MsgAudio:    {MimeTypes: anyMime},
+			event.CapMsgVoice: {MimeTypes: anyMime},
+			event.MsgVideo:    {MimeTypes: anyMime},
 		},
 	}
 }
@@ -427,14 +427,22 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		}
 
 	case event.MsgAudio, event.MsgVideo:
-		data, _, err := c.downloadMatrixMedia(ctx, msg)
+		data, srcMIME, err := c.downloadMatrixMedia(ctx, msg)
 		if err != nil {
 			return nil, fmt.Errorf("download audio: %w", err)
+		}
+		if srcMIME == "" {
+			srcMIME = "audio/ogg"
+		}
+		amrData, transcodeErr := ToXploraAMR(ctx, data, srcMIME)
+		if transcodeErr != nil {
+			c.log.Warn().Err(transcodeErr).Str("mime", srcMIME).Msg("Audio→AMR transcode failed, sending raw")
+			amrData = data
 		}
 		durationSec := msg.Content.GetInfo().Duration / 1000
 		params = xplora.SendChatMsgParams{
 			Type:     "VOICE",
-			Body:     base64.StdEncoding.EncodeToString(data),
+			Body:     base64.StdEncoding.EncodeToString(amrData),
 			Duration: durationSec,
 		}
 
@@ -623,16 +631,16 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage, string, int64, bool) {
 	var envelope struct {
 		Content *struct {
-			MsgID    int64   `json:"msg_id"`
-			MsgType  string  `json:"msg_type"`
-			Receiver string  `json:"receiver"`
-			Sender   string  `json:"sender"`
-			Text     string  `json:"text"`
-			Time     int64   `json:"time"`
+			MsgID    int64  `json:"msg_id"`
+			MsgType  string `json:"msg_type"`
+			Receiver string `json:"receiver"`
+			Sender   string `json:"sender"`
+			Text     string `json:"text"`
+			Time     int64  `json:"time"`
 			// Location fields present in location_update payloads.
-			Lat      float64 `json:"lat"`
-			Lng      float64 `json:"lng"`
-			Addr     string  `json:"addr"`
+			Lat  float64 `json:"lat"`
+			Lng  float64 `json:"lng"`
+			Addr string  `json:"addr"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
@@ -649,9 +657,9 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	if ct.MsgType == "chat_emoticon" {
 		var emoticonEnv struct {
 			Content struct {
-				MsgID      int64 `json:"msg_id"`
-				EmoticonID any   `json:"emoticon_id"` // int or string
-				Time       int64 `json:"time"`
+				MsgID      int64  `json:"msg_id"`
+				EmoticonID any    `json:"emoticon_id"` // int or string
+				Time       int64  `json:"time"`
 				Sender     string `json:"sender"`
 				Receiver   string `json:"receiver"`
 			} `json:"content"`
@@ -856,7 +864,6 @@ func abs64(x int64) int64 {
 	}
 	return x
 }
-
 
 // makeURLAvatar builds a bridgev2.Avatar that downloads an image from url.
 func makeURLAvatar(avatarURL string) *bridgev2.Avatar {
@@ -1110,7 +1117,9 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 
 // migrateChildAvatarURLs converts any legacy fetch_icon URLs stored in metadata
 // to the new api.myxplora.com/file?id= format. The old URL pattern was:
-//   https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_{id}_{fileID}
+//
+//	https://xplora3.myxplora.com/fetch_icon?p=USER-ICON_{id}_{fileID}
+//
 // The file ID is the last underscore-delimited segment.
 func (c *XploraClient) migrateChildAvatarURLs(ctx context.Context) {
 	changed := false
