@@ -1033,24 +1033,36 @@ func (c *XploraClient) dispatchBestLocateFix(wuid string) {
 // so no Sender field is required on the synthetic ChatMessage.
 func (c *XploraClient) dispatchLocationMessage(wuid string, loc *xplora.LocationInfo, ts time.Time) {
 	msgType := "TRACKER_UPDATE"
+	// Pre-bake the GPS fix age into the address string so it appears in the
+	// message body, but do NOT set Create on the ChatMessage. This means the
+	// Matrix event timestamp will be time.Now() (not backdated to the fix time),
+	// so the event appears at the correct position in the timeline.
+	addr := loc.Addr
+	if !ts.IsZero() {
+		age := formatAge(ts)
+		if addr != "" {
+			addr = addr + " — " + age
+		} else {
+			addr = age
+		}
+	}
 	locMap := map[string]any{
 		"lat":  float64(loc.Lat),
 		"lng":  float64(loc.Lng),
-		"addr": loc.Addr,
+		"addr": addr,
 	}
 	if loc.Battery > 0 {
 		locMap["battery"]     = loc.Battery
 		locMap["is_charging"] = loc.IsCharging
 	}
 	dataJSON, _ := json.Marshal(locMap)
-	createSec := ts.Unix()
 	msgID := fmt.Sprintf("locate-%d", ts.UnixMilli())
 	c.dispatchChatMessage(wuid, xplora.ChatMessage{
-		ID:     msgID,
-		MsgID:  msgID,
-		Type:   &msgType,
-		Data:   dataJSON,
-		Create: &createSec,
+		ID:    msgID,
+		MsgID: msgID,
+		Type:  &msgType,
+		Data:  dataJSON,
+		// Create intentionally omitted: Matrix event timestamp = time.Now()
 	}, false)
 }
 
