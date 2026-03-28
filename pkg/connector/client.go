@@ -618,7 +618,6 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 			if w.ChildUID() == wuid &&
 				chatMsg.Sender != nil &&
 				(chatMsg.Sender.ID == w.ChildUID() ||
-					chatMsg.Sender.ID == w.ID || // watch device ID used in FCM payloads
 					(w.FCMID != "" && chatMsg.Sender.ID == w.FCMID)) {
 				isFromChild = true
 				break
@@ -665,6 +664,9 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Sender   string `json:"sender"`
 			Text     string `json:"text"`
 			Time     int64  `json:"time"`
+			// NoBadge is true on parent→child messages (echo of parent's own send).
+			// Used to determine direction for FCMID learning.
+			NoBadge bool `json:"no_badge"`
 			// Location fields present in location_update payloads.
 			Lat        float64 `json:"lat"`
 			Lng        float64 `json:"lng"`
@@ -692,6 +694,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 				Time       int64  `json:"time"`
 				Sender     string `json:"sender"`
 				Receiver   string `json:"receiver"`
+				NoBadge    bool   `json:"no_badge"`
 			} `json:"content"`
 		}
 		if err := json.Unmarshal(raw, &emoticonEnv); err != nil || emoticonEnv.Content.MsgID == 0 {
@@ -712,20 +715,45 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		createSec := ec.Time / 1000
 		// Resolve wuid using the same logic as the main path.
 		wuid := ""
-		for _, w := range c.meta.Children {
+		matchIdxEmoticon := -1
+		for i, w := range c.meta.Children {
 			childUID := w.ChildUID()
 			if ec.Receiver == childUID || ec.Sender == childUID ||
 				(w.FCMID != "" && (ec.Receiver == w.FCMID || ec.Sender == w.FCMID)) {
 				wuid = childUID
+				matchIdxEmoticon = i
 				break
 			}
 		}
 		if wuid == "" && len(c.meta.Children) == 1 {
 			wuid = c.meta.Children[0].ChildUID()
+			matchIdxEmoticon = 0
 		}
 		if wuid == "" {
 			c.log.Warn().RawJSON("fcm_payload", raw).Msg("FCM chat_emoticon: cannot match to child, dropping")
 			return xplora.ChatMessage{}, "", 0, false
+		}
+		// Learn or correct child's FCM ID (same logic as main path).
+		var ecFCMIDCandidate string
+		if ec.NoBadge {
+			if ec.Receiver != wuid && ec.Receiver != "" {
+				ecFCMIDCandidate = ec.Receiver
+			}
+		} else {
+			if ec.Sender != wuid && ec.Sender != "" {
+				ecFCMIDCandidate = ec.Sender
+			}
+		}
+		if matchIdxEmoticon >= 0 && ecFCMIDCandidate != "" && ecFCMIDCandidate != c.meta.Children[matchIdxEmoticon].FCMID {
+			oldFCMID := c.meta.Children[matchIdxEmoticon].FCMID
+			c.meta.Children[matchIdxEmoticon].FCMID = ecFCMIDCandidate
+			ctx := c.userLogin.Log.WithContext(context.Background())
+			c.userLogin.Save(ctx)
+			if oldFCMID == "" {
+				c.log.Debug().Str("wuid", wuid).Str("fcm_id", ecFCMIDCandidate).Msg("Learned FCM user ID for child (emoticon)")
+			} else {
+				c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", ecFCMIDCandidate).Msg("Corrected wrong FCM user ID for child (emoticon)")
+			}
 		}
 		var senderRef *xplora.UserRef
 		if ec.Sender != "" {
@@ -752,7 +780,6 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	for i, w := range c.meta.Children {
 		childUID := w.ChildUID()
 		if ct.Receiver == childUID || ct.Sender == childUID ||
-			ct.Receiver == w.ID || ct.Sender == w.ID || // watch device ID used in FCM
 			(w.FCMID != "" && (ct.Receiver == w.FCMID || ct.Sender == w.FCMID)) {
 			wuid = childUID
 			matchIdx = i
@@ -782,17 +809,31 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Msg("FCM direct parse: could not match sender/receiver to a known child")
 		return xplora.ChatMessage{}, "", 0, false
 	}
-	// Learn the child's FCM user ID if we don't have it yet.
-	// Only learn from a parent→child message (ct.Sender is the parent, ct.Receiver is
-	// the child's FCM account ID). In child→parent direction ct.Sender == w.ID (the
-	// watch device ID) and ct.Receiver is the parent's identifier — do not learn that.
-	if matchIdx >= 0 && c.meta.Children[matchIdx].FCMID == "" {
-		w := c.meta.Children[matchIdx]
-		if ct.Sender != w.ID && ct.Receiver != wuid && ct.Receiver != "" {
-			c.meta.Children[matchIdx].FCMID = ct.Receiver
+	// Learn or correct child's FCM ID using message direction.
+	// no_badge=true means parent→child (echo of parent's send): child is the receiver.
+	// no_badge=false/absent means child→parent or system: child is the sender.
+	// Running on every message (not just when FCMID is empty) corrects wrong stored values.
+	if matchIdx >= 0 {
+		var fcmIDCandidate string
+		if ct.NoBadge {
+			if ct.Receiver != wuid && ct.Receiver != "" {
+				fcmIDCandidate = ct.Receiver
+			}
+		} else {
+			if ct.Sender != wuid && ct.Sender != "" {
+				fcmIDCandidate = ct.Sender
+			}
+		}
+		if fcmIDCandidate != "" && fcmIDCandidate != c.meta.Children[matchIdx].FCMID {
+			oldFCMID := c.meta.Children[matchIdx].FCMID
+			c.meta.Children[matchIdx].FCMID = fcmIDCandidate
 			ctx := c.userLogin.Log.WithContext(context.Background())
 			c.userLogin.Save(ctx)
-			c.log.Debug().Str("wuid", wuid).Str("fcm_id", ct.Receiver).Msg("Learned FCM user ID for child")
+			if oldFCMID == "" {
+				c.log.Debug().Str("wuid", wuid).Str("fcm_id", fcmIDCandidate).Msg("Learned FCM user ID for child")
+			} else {
+				c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", fcmIDCandidate).Msg("Corrected wrong FCM user ID for child")
+			}
 		}
 	}
 
