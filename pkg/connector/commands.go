@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,7 +9,6 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
-	"maunium.net/go/mautrix/event"
 )
 
 // RegisterCommands registers Xplora-specific bot commands with the bridge processor.
@@ -43,55 +43,35 @@ var cmdLocate = &commands.FullHandler{
 			return
 		}
 
-		// Ask the watch to push a fresh GPS fix (best-effort; location update is async).
-		if err := client.gql.AskWatchLocate(ce.Ctx, meta.WUID); err != nil {
-			client.log.Warn().Err(err).Str("wuid", meta.WUID).Msg("locate: askWatchLocate failed")
-		}
+		// Ask the watch to push a fresh GPS fix (result arrives via FCM).
+		_ = client.gql.AskWatchLocate(ce.Ctx, meta.WUID)
 
-		loc, err := client.gql.GetWatchLastLocation(ce.Ctx, meta.WUID)
-		if err != nil {
-			ce.Reply("Failed to get location: %v", err)
-			return
-		}
-		if loc == nil || (loc.Lat == 0 && loc.Lng == 0) {
-			ce.Reply("No location data available for this watch.")
-			return
-		}
-
-		// Tm may be Unix seconds or Unix milliseconds depending on API version.
-		var ts time.Time
-		if loc.Tm > 1e12 {
-			ts = time.UnixMilli(loc.Tm)
-		} else {
-			ts = time.Unix(loc.Tm, 0)
-		}
-
-		// Send as a native Matrix location event. Element renders this as an
-		// interactive map with a pin. The body acts as fallback text for
-		// clients that don't support m.location.
-		geoURI := fmt.Sprintf("geo:%.6f,%.6f", loc.Lat, loc.Lng)
-		var bodyParts []string
-		if loc.Addr != "" {
-			bodyParts = append(bodyParts, loc.Addr)
-		} else {
-			bodyParts = append(bodyParts, fmt.Sprintf("%.6f, %.6f", loc.Lat, loc.Lng))
-		}
-		bodyParts = append(bodyParts, formatAge(ts))
-		if loc.Battery > 0 {
-			if loc.IsCharging {
-				bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%% ⚡", loc.Battery))
-			} else {
-				bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%%", loc.Battery))
+		// Wait up to 12s for the FCM location_update to arrive and be dispatched
+		// automatically (as the child's ghost user, once Bug #1 fixes are active).
+		// If it doesn't come, fall back to the last cached location.
+		locateCh := client.beginLocate(meta.WUID)
+		wuid := meta.WUID
+		go func() {
+			select {
+			case <-locateCh:
+				// FCM response arrived and was dispatched — nothing more to do.
+				return
+			case <-time.After(12 * time.Second):
 			}
-		}
-
-		_, _ = ce.Bot.SendMessage(ce.Ctx, ce.Portal.MXID, event.EventMessage, &event.Content{
-			Parsed: &event.MessageEventContent{
-				MsgType: event.MsgLocation,
-				Body:    strings.Join(bodyParts, " — "),
-				GeoURI:  geoURI,
-			},
-		}, nil)
+			// Fallback: show the last known cached location.
+			loc, err := client.gql.GetWatchLastLocation(context.Background(), wuid)
+			if err != nil || loc == nil || (loc.Lat == 0 && loc.Lng == 0) {
+				client.log.Debug().Str("wuid", wuid).Msg("locate: no location available after FCM timeout")
+				return
+			}
+			var ts time.Time
+			if loc.Tm > 1e12 {
+				ts = time.UnixMilli(loc.Tm)
+			} else {
+				ts = time.Unix(loc.Tm, 0)
+			}
+			client.dispatchLocationMessage(wuid, loc, ts)
+		}()
 	},
 }
 

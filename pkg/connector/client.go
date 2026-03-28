@@ -60,18 +60,25 @@ type XploraClient struct {
 	// we just sent from Matrix (Xplora always echoes sends back via FCM).
 	recentSentMu sync.Mutex
 	recentSents  []recentSent
+
+	// recentLocateMu guards recentLocateChans. Each entry is a channel closed
+	// when a TRACKER_UPDATE FCM arrives for that wuid, allowing cmdLocate to
+	// skip the fallback GetWatchLastLocation call.
+	recentLocateMu    sync.Mutex
+	recentLocateChans map[string]chan struct{}
 }
 
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
 
 func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplora.Auth, gql *xplora.Client, meta *UserLoginMetadata) *XploraClient {
 	return &XploraClient{
-		connector: xc,
-		userLogin: login,
-		meta:      meta,
-		auth:      auth,
-		gql:       gql,
-		log:       login.Log.With().Str("component", "xplora-client").Logger(),
+		connector:         xc,
+		userLogin:         login,
+		meta:              meta,
+		auth:              auth,
+		gql:               gql,
+		log:               login.Log.With().Str("component", "xplora-client").Logger(),
+		recentLocateChans: make(map[string]chan struct{}),
 	}
 }
 
@@ -610,12 +617,19 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		for _, w := range c.meta.Children {
 			if w.ChildUID() == wuid &&
 				chatMsg.Sender != nil &&
-				(chatMsg.Sender.ID == w.ChildUID() || chatMsg.Sender.ID == w.FCMID) {
+				(chatMsg.Sender.ID == w.ChildUID() ||
+					chatMsg.Sender.ID == w.ID || // watch device ID used in FCM payloads
+					(w.FCMID != "" && chatMsg.Sender.ID == w.FCMID)) {
 				isFromChild = true
 				break
 			}
 		}
 		isFromMe := !isFromChild
+		// Signal cmdLocate goroutine that a fresh location arrived via FCM so it
+		// can skip the GetWatchLastLocation fallback.
+		if derefStr(chatMsg.Type) == "TRACKER_UPDATE" {
+			c.signalLocateReceived(wuid)
+		}
 		// Suppress FCM echo: Xplora sends back a push for every message the parent
 		// sends. If this matches a text we just sent from Matrix, skip the dispatch
 		// to prevent duplicates. (Messages sent from the Xplora app won't match any
@@ -652,9 +666,11 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Text     string `json:"text"`
 			Time     int64  `json:"time"`
 			// Location fields present in location_update payloads.
-			Lat  float64 `json:"lat"`
-			Lng  float64 `json:"lng"`
-			Addr string  `json:"addr"`
+			Lat        float64 `json:"lat"`
+			Lng        float64 `json:"lng"`
+			Addr       string  `json:"addr"`
+			Battery    int     `json:"battery"`
+			IsCharging int     `json:"is_charging"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
@@ -736,6 +752,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	for i, w := range c.meta.Children {
 		childUID := w.ChildUID()
 		if ct.Receiver == childUID || ct.Sender == childUID ||
+			ct.Receiver == w.ID || ct.Sender == w.ID || // watch device ID used in FCM
 			(w.FCMID != "" && (ct.Receiver == w.FCMID || ct.Sender == w.FCMID)) {
 			wuid = childUID
 			matchIdx = i
@@ -766,20 +783,16 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		return xplora.ChatMessage{}, "", 0, false
 	}
 	// Learn the child's FCM user ID if we don't have it yet.
-	// In a parent→child message the receiver IS the child's FCM account ID.
-	// In a child→parent message the sender is the child's FCM account ID.
+	// Only learn from a parent→child message (ct.Sender is the parent, ct.Receiver is
+	// the child's FCM account ID). In child→parent direction ct.Sender == w.ID (the
+	// watch device ID) and ct.Receiver is the parent's identifier — do not learn that.
 	if matchIdx >= 0 && c.meta.Children[matchIdx].FCMID == "" {
-		fcmID := ""
-		if ct.Receiver != wuid && ct.Receiver != "" {
-			fcmID = ct.Receiver
-		} else if ct.Sender != wuid && ct.Sender != c.meta.UserID && ct.Sender != "" {
-			fcmID = ct.Sender
-		}
-		if fcmID != "" {
-			c.meta.Children[matchIdx].FCMID = fcmID
+		w := c.meta.Children[matchIdx]
+		if ct.Sender != w.ID && ct.Receiver != wuid && ct.Receiver != "" {
+			c.meta.Children[matchIdx].FCMID = ct.Receiver
 			ctx := c.userLogin.Log.WithContext(context.Background())
 			c.userLogin.Save(ctx)
-			c.log.Debug().Str("wuid", wuid).Str("fcm_id", fcmID).Msg("Learned FCM user ID for child")
+			c.log.Debug().Str("wuid", wuid).Str("fcm_id", ct.Receiver).Msg("Learned FCM user ID for child")
 		}
 	}
 
@@ -791,11 +804,16 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	// can produce an m.location event. For other types, encode the text field.
 	var dataJSON json.RawMessage
 	if ct.MsgType == "location_update" && (ct.Lat != 0 || ct.Lng != 0) {
-		dataJSON, _ = json.Marshal(map[string]any{
+		locMap := map[string]any{
 			"lat":  ct.Lat,
 			"lng":  ct.Lng,
 			"addr": ct.Addr,
-		})
+		}
+		if ct.Battery > 0 {
+			locMap["battery"]     = ct.Battery
+			locMap["is_charging"] = ct.IsCharging != 0
+		}
+		dataJSON, _ = json.Marshal(locMap)
 	} else if ct.Text != "" {
 		dataJSON, _ = json.Marshal(ct.Text)
 	}
@@ -877,6 +895,59 @@ func abs64(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// beginLocate registers a channel that is closed when a TRACKER_UPDATE FCM
+// arrives for wuid, signalling cmdLocate's goroutine to skip the fallback.
+// If a prior pending locate exists for the same wuid it is cancelled first so
+// the old goroutine exits cleanly without posting a stale fallback location.
+func (c *XploraClient) beginLocate(wuid string) <-chan struct{} {
+	ch := make(chan struct{})
+	c.recentLocateMu.Lock()
+	if old, ok := c.recentLocateChans[wuid]; ok {
+		close(old)
+	}
+	c.recentLocateChans[wuid] = ch
+	c.recentLocateMu.Unlock()
+	return ch
+}
+
+// signalLocateReceived closes the pending locate channel for wuid (if any),
+// unblocking the cmdLocate fallback goroutine so it skips GetWatchLastLocation.
+func (c *XploraClient) signalLocateReceived(wuid string) {
+	c.recentLocateMu.Lock()
+	defer c.recentLocateMu.Unlock()
+	if ch, ok := c.recentLocateChans[wuid]; ok {
+		close(ch)
+		delete(c.recentLocateChans, wuid)
+	}
+}
+
+// dispatchLocationMessage routes a cached location (from GetWatchLastLocation)
+// through the bridge pipeline so it appears from the child's ghost user.
+// dispatchChatMessage derives the Matrix sender from wuid+isFromMe directly,
+// so no Sender field is required on the synthetic ChatMessage.
+func (c *XploraClient) dispatchLocationMessage(wuid string, loc *xplora.LocationInfo, ts time.Time) {
+	msgType := "TRACKER_UPDATE"
+	locMap := map[string]any{
+		"lat":  float64(loc.Lat),
+		"lng":  float64(loc.Lng),
+		"addr": loc.Addr,
+	}
+	if loc.Battery > 0 {
+		locMap["battery"]     = loc.Battery
+		locMap["is_charging"] = loc.IsCharging
+	}
+	dataJSON, _ := json.Marshal(locMap)
+	createSec := ts.Unix()
+	msgID := fmt.Sprintf("locate-%d", ts.UnixMilli())
+	c.dispatchChatMessage(wuid, xplora.ChatMessage{
+		ID:     msgID,
+		MsgID:  msgID,
+		Type:   &msgType,
+		Data:   dataJSON,
+		Create: &createSec,
+	}, false)
 }
 
 // makeURLAvatar builds a bridgev2.Avatar that downloads an image from url.

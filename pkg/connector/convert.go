@@ -101,23 +101,37 @@ func convertLocationUpdate(msg xplora.ChatMessage, extra map[string]any) *bridge
 		return nil
 	}
 	var loc struct {
-		Lat  float64 `json:"lat"`
-		Lng  float64 `json:"lng"`
-		Addr string  `json:"addr"`
+		Lat        float64 `json:"lat"`
+		Lng        float64 `json:"lng"`
+		Addr       string  `json:"addr"`
+		Battery    int     `json:"battery"`
+		IsCharging bool    `json:"is_charging"`
 	}
 	if err := json.Unmarshal(msg.Data, &loc); err != nil || (loc.Lat == 0 && loc.Lng == 0) {
 		return nil
 	}
 	geoURI := fmt.Sprintf("geo:%.6f,%.6f", loc.Lat, loc.Lng)
-	body := loc.Addr
-	if body == "" {
-		body = fmt.Sprintf("%.6f, %.6f", loc.Lat, loc.Lng)
+	var bodyParts []string
+	if loc.Addr != "" {
+		bodyParts = append(bodyParts, loc.Addr)
+	} else {
+		bodyParts = append(bodyParts, fmt.Sprintf("%.6f, %.6f", loc.Lat, loc.Lng))
+	}
+	if msg.Create != nil {
+		bodyParts = append(bodyParts, formatAge(time.Unix(*msg.Create, 0)))
+	}
+	if loc.Battery > 0 {
+		if loc.IsCharging {
+			bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%% ⚡", loc.Battery))
+		} else {
+			bodyParts = append(bodyParts, fmt.Sprintf("🔋 %d%%", loc.Battery))
+		}
 	}
 	return &bridgev2.ConvertedMessagePart{
 		Type: event.EventMessage,
 		Content: &event.MessageEventContent{
 			MsgType: event.MsgLocation,
-			Body:    body,
+			Body:    strings.Join(bodyParts, " — "),
 			GeoURI:  geoURI,
 		},
 		Extra: extra,
@@ -294,14 +308,26 @@ func extractMessageText(msg xplora.ChatMessage) string {
 
 // formatCallLog parses CALL_LOG data and returns a human-readable description.
 // Expected fields: call_type ("incoming"/"outgoing"/"missed"), call_name, duration (seconds).
+// Both snake_case and camelCase field names are supported (different API versions differ).
 func formatCallLog(data json.RawMessage) string {
 	var d struct {
-		CallType string `json:"call_type"`
-		CallName string `json:"call_name"`
-		Duration int    `json:"duration"`
+		CallType   string `json:"call_type"`
+		CallName   string `json:"call_name"`
+		Duration   int    `json:"duration"`
+		CallTypeCC string `json:"callType"`
+		CallNameCC string `json:"callName"`
 	}
-	if err := json.Unmarshal(data, &d); err != nil || d.CallName == "" {
+	if err := json.Unmarshal(data, &d); err != nil {
 		return ""
+	}
+	if d.CallType == "" {
+		d.CallType = d.CallTypeCC
+	}
+	if d.CallName == "" {
+		d.CallName = d.CallNameCC
+	}
+	if d.CallName == "" {
+		return fmt.Sprintf("[Call: %s]", string(data))
 	}
 	switch d.CallType {
 	case "incoming":
