@@ -46,17 +46,17 @@ var cmdLocate = &commands.FullHandler{
 		// Ask the watch to push a fresh GPS fix (result arrives via FCM).
 		_ = client.gql.AskWatchLocate(ce.Ctx, meta.WUID)
 
-		// Wait up to 12s for the FCM location_update to arrive and be dispatched
-		// automatically (as the child's ghost user, once Bug #1 fixes are active).
-		// If it doesn't come, fall back to the last cached location.
+		// Wait up to 35s for the FCM location_update to arrive. The watch may take
+		// up to ~25s to push the GPS fix via FCM, so 35s gives enough headroom.
+		// If no FCM push arrives within the window, fall back to the last cached location.
 		locateCh := client.beginLocate(meta.WUID)
 		wuid := meta.WUID
 		go func() {
 			select {
 			case <-locateCh:
-				// FCM response arrived and was dispatched — nothing more to do.
+				// FCM response arrived and is being collected — nothing more to do.
 				return
-			case <-time.After(12 * time.Second):
+			case <-time.After(35 * time.Second):
 			}
 			// Fallback: show the last known cached location.
 			loc, err := client.gql.GetWatchLastLocation(context.Background(), wuid)
