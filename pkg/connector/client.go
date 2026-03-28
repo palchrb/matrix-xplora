@@ -61,11 +61,15 @@ type XploraClient struct {
 	recentSentMu sync.Mutex
 	recentSents  []recentSent
 
-	// recentLocateMu guards recentLocateChans. Each entry is a channel closed
-	// when a TRACKER_UPDATE FCM arrives for that wuid, allowing cmdLocate to
-	// skip the fallback GetWatchLastLocation call.
-	recentLocateMu    sync.Mutex
-	recentLocateChans map[string]chan struct{}
+	// recentLocateMu guards recentLocateChans and recentLocateSuppressUntil.
+	// recentLocateChans: channel closed when a TRACKER_UPDATE FCM arrives for a wuid,
+	// allowing cmdLocate to skip the fallback GetWatchLastLocation call.
+	// recentLocateSuppressUntil: unix-ms deadline; TRACKER_UPDATE FCM pushes for
+	// a wuid are suppressed until this time to prevent duplicates when the watch
+	// sends multiple location fixes in response to a single locate request.
+	recentLocateMu             sync.Mutex
+	recentLocateChans          map[string]chan struct{}
+	recentLocateSuppressUntil  map[string]int64
 }
 
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
@@ -78,7 +82,8 @@ func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplor
 		auth:              auth,
 		gql:               gql,
 		log:               login.Log.With().Str("component", "xplora-client").Logger(),
-		recentLocateChans: make(map[string]chan struct{}),
+		recentLocateChans:         make(map[string]chan struct{}),
+		recentLocateSuppressUntil: make(map[string]int64),
 	}
 }
 
@@ -624,10 +629,19 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 			}
 		}
 		isFromMe := !isFromChild
-		// Signal cmdLocate goroutine that a fresh location arrived via FCM so it
-		// can skip the GetWatchLastLocation fallback.
+		// Handle TRACKER_UPDATE (location) deduplication for !locate:
+		// - If a locate was pending: signal the goroutine (first fix) and start a
+		//   30s suppress window to drop follow-up fixes the watch often sends.
+		// - If no locate was pending but we're in the suppress window: drop the push.
 		if derefStr(chatMsg.Type) == "TRACKER_UPDATE" {
-			c.signalLocateReceived(wuid)
+			if wasLocatePending := c.signalLocateReceived(wuid); !wasLocatePending {
+				if c.inLocateSuppressWindow(wuid) {
+					c.log.Debug().Str("wuid", wuid).Str("msg_id", chatMsg.MsgID).
+						Msg("FCM: suppressing follow-up location_update within post-locate window")
+					c.updateLastMsgID(wuid, chatMsg.MsgID)
+					return
+				}
+			}
 		}
 		// Suppress FCM echo: Xplora sends back a push for every message the parent
 		// sends. If this matches a text we just sent from Matrix, skip the dispatch
@@ -955,13 +969,36 @@ func (c *XploraClient) beginLocate(wuid string) <-chan struct{} {
 
 // signalLocateReceived closes the pending locate channel for wuid (if any),
 // unblocking the cmdLocate fallback goroutine so it skips GetWatchLastLocation.
-func (c *XploraClient) signalLocateReceived(wuid string) {
+// Returns true if an active locate was pending (i.e. this is the first FCM
+// response to a !locate command). In that case a 30-second suppress window is
+// started to drop the follow-up location fixes the watch often sends shortly after.
+func (c *XploraClient) signalLocateReceived(wuid string) bool {
 	c.recentLocateMu.Lock()
 	defer c.recentLocateMu.Unlock()
-	if ch, ok := c.recentLocateChans[wuid]; ok {
-		close(ch)
-		delete(c.recentLocateChans, wuid)
+	ch, ok := c.recentLocateChans[wuid]
+	if !ok {
+		return false
 	}
+	close(ch)
+	delete(c.recentLocateChans, wuid)
+	c.recentLocateSuppressUntil[wuid] = time.Now().Add(30 * time.Second).UnixMilli()
+	return true
+}
+
+// inLocateSuppressWindow returns true if TRACKER_UPDATE FCM pushes for wuid
+// should be dropped because they arrived within the post-locate suppress window.
+func (c *XploraClient) inLocateSuppressWindow(wuid string) bool {
+	c.recentLocateMu.Lock()
+	defer c.recentLocateMu.Unlock()
+	until, ok := c.recentLocateSuppressUntil[wuid]
+	if !ok {
+		return false
+	}
+	if time.Now().UnixMilli() > until {
+		delete(c.recentLocateSuppressUntil, wuid)
+		return false
+	}
+	return true
 }
 
 // dispatchLocationMessage routes a cached location (from GetWatchLastLocation)
