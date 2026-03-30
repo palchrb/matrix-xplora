@@ -68,16 +68,21 @@ type XploraClient struct {
 	recentSentMu sync.Mutex
 	recentSents  []recentSent
 
-	// recentLocateMu guards recentLocateChans and recentLocateBestFix.
+	// recentLocateMu guards recentLocateChans, recentLocateBestFix, and
+	// recentLocateSuppressUntil.
 	// recentLocateChans: channel closed when a TRACKER_UPDATE FCM arrives for a wuid,
 	// allowing cmdLocate to skip the fallback GetWatchLastLocation call.
 	// recentLocateBestFix: when a !locate is in progress, incoming TRACKER_UPDATE
 	// FCM pushes are collected here instead of being dispatched immediately. A
 	// goroutine dispatches the best (last) collected fix after 25 seconds, giving
 	// the watch time to refine from a coarse cell/WiFi fix to a proper GPS fix.
-	recentLocateMu      sync.Mutex
-	recentLocateChans   map[string]chan struct{}
-	recentLocateBestFix map[string]pendingLocateFix
+	// recentLocateSuppressUntil: after the best fix is dispatched, suppress any
+	// further TRACKER_UPDATE pushes for 45 more seconds. Xplora sometimes sends a
+	// second wave of (usually less accurate) fixes ~50s after the command.
+	recentLocateMu            sync.Mutex
+	recentLocateChans         map[string]chan struct{}
+	recentLocateBestFix       map[string]pendingLocateFix
+	recentLocateSuppressUntil map[string]int64
 }
 
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
@@ -90,8 +95,9 @@ func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplor
 		auth:              auth,
 		gql:               gql,
 		log:               login.Log.With().Str("component", "xplora-client").Logger(),
-		recentLocateChans:   make(map[string]chan struct{}),
-		recentLocateBestFix: make(map[string]pendingLocateFix),
+		recentLocateChans:         make(map[string]chan struct{}),
+		recentLocateBestFix:       make(map[string]pendingLocateFix),
+		recentLocateSuppressUntil: make(map[string]int64),
 	}
 }
 
@@ -638,13 +644,13 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		}
 		isFromMe := !isFromChild
 		// Handle TRACKER_UPDATE (location) deduplication for !locate:
-		// When a locate is in progress, collect all incoming fixes for 25 seconds
-		// and dispatch only the last/best one (the watch sends a coarse cell/WiFi
-		// fix first, then refines to GPS). Outside a locate window: dispatch normally.
+		// - Collect window (25s from first fix): store best fix, dispatch after window.
+		// - Suppress window (45s after dispatch): drop straggler fixes Xplora sends.
+		// - Outside both windows: dispatch normally.
 		if derefStr(chatMsg.Type) == "TRACKER_UPDATE" {
-			if c.updateLocateBestFix(wuid, chatMsg, fcmMsgID) {
-				c.log.Debug().Str("wuid", wuid).Str("msg_id", chatMsg.MsgID).
-					Msg("FCM: collected location fix for best-of-window dispatch")
+			if suppressed, reason := c.updateLocateBestFix(wuid, chatMsg, fcmMsgID); suppressed {
+				c.log.Debug().Str("wuid", wuid).Str("msg_id", chatMsg.MsgID).Str("reason", reason).
+					Msg("FCM: location fix suppressed by locate dedup")
 				c.updateLastMsgID(wuid, chatMsg.MsgID)
 				return
 			}
@@ -974,20 +980,27 @@ func (c *XploraClient) beginLocate(wuid string) <-chan struct{} {
 }
 
 // updateLocateBestFix is called for every TRACKER_UPDATE FCM push.
-// If a !locate is in progress for wuid (channel registered by beginLocate),
-// the fix is stored as the current best and true is returned — the caller
-// must NOT dispatch the message immediately.
-// On the first call for a given wuid, a goroutine is started that waits 25s
-// and then dispatches the best collected fix via dispatchBestLocateFix.
-// If no locate is in progress, false is returned and the caller dispatches normally.
-func (c *XploraClient) updateLocateBestFix(wuid string, msg xplora.ChatMessage, fcmMsgID int64) bool {
+// Returns (true, reason) if the caller should NOT dispatch the message:
+//   - "collect": a !locate is in progress; fix stored for best-of-window dispatch.
+//   - "suppress": post-dispatch suppress window is active; straggler fix dropped.
+//
+// Returns (false, "") when no locate is in progress and the fix should be dispatched normally.
+func (c *XploraClient) updateLocateBestFix(wuid string, msg xplora.ChatMessage, fcmMsgID int64) (bool, string) {
 	c.recentLocateMu.Lock()
 	_, locatePending := c.recentLocateChans[wuid]
 	if !locatePending {
 		_, collectPending := c.recentLocateBestFix[wuid]
 		if !collectPending {
+			// Check post-dispatch suppress window.
+			if until, ok := c.recentLocateSuppressUntil[wuid]; ok {
+				if time.Now().UnixMilli() <= until {
+					c.recentLocateMu.Unlock()
+					return true, "suppress"
+				}
+				delete(c.recentLocateSuppressUntil, wuid)
+			}
 			c.recentLocateMu.Unlock()
-			return false
+			return false, ""
 		}
 	}
 	_, alreadyCollecting := c.recentLocateBestFix[wuid]
@@ -1006,7 +1019,7 @@ func (c *XploraClient) updateLocateBestFix(wuid string, msg xplora.ChatMessage, 
 			c.dispatchBestLocateFix(wuid)
 		}()
 	}
-	return true
+	return true, "collect"
 }
 
 // dispatchBestLocateFix dispatches the best collected location fix for wuid
@@ -1016,6 +1029,8 @@ func (c *XploraClient) dispatchBestLocateFix(wuid string) {
 	fix, ok := c.recentLocateBestFix[wuid]
 	if ok {
 		delete(c.recentLocateBestFix, wuid)
+		// Suppress straggler fixes Xplora may send for another 45s.
+		c.recentLocateSuppressUntil[wuid] = time.Now().Add(45 * time.Second).UnixMilli()
 	}
 	c.recentLocateMu.Unlock()
 	if !ok {
