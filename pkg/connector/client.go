@@ -887,6 +887,8 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			locMap["is_charging"] = ct.IsCharging != 0
 		}
 		dataJSON, _ = json.Marshal(locMap)
+	} else if ct.MsgType == "low_power" && ct.Battery > 0 {
+		dataJSON, _ = json.Marshal(map[string]any{"battery": ct.Battery})
 	} else if ct.MsgType == "call_log" {
 		// Build call log data in the same format formatCallLog expects.
 		// FCM uses integer call_type (1=outgoing,2=incoming,3=missed); store as string.
@@ -936,6 +938,8 @@ func fcmMsgTypeToXplora(fcmType string) string {
 		return "TRACKER_UPDATE"
 	case "call_log":
 		return "CALL_LOG"
+	case "low_power":
+		return "LOW_BATTERY"
 	default:
 		return fcmType
 	}
