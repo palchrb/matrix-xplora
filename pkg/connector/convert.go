@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/palchrb/matrix-xplora/internal/xplora"
+	"github.com/rs/zerolog/log"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 )
@@ -318,6 +319,7 @@ func formatCallLog(data json.RawMessage) string {
 		CallNameCC string `json:"callName"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
+		log.Warn().RawJSON("call_log_data", data).Msg("CALL_LOG: failed to parse data — please report this payload so field names can be mapped")
 		return ""
 	}
 	if d.CallType == "" {
@@ -327,6 +329,7 @@ func formatCallLog(data json.RawMessage) string {
 		d.CallName = d.CallNameCC
 	}
 	if d.CallName == "" {
+		log.Warn().RawJSON("call_log_data", data).Msg("CALL_LOG: no call_name/callName field found — please report this payload so field names can be mapped")
 		return fmt.Sprintf("[Call: %s]", string(data))
 	}
 	switch d.CallType {
