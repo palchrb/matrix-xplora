@@ -9,6 +9,8 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // RegisterCommands registers Xplora-specific bot commands with the bridge processor.
@@ -63,6 +65,7 @@ var cmdLocate = &commands.FullHandler{
 			loc, err := client.gql.GetWatchLastLocation(context.Background(), wuid)
 			if err != nil || loc == nil || (loc.Lat == 0 && loc.Lng == 0) {
 				client.log.Debug().Str("wuid", wuid).Msg("locate: no location available after FCM timeout")
+				sendLocateFailure(ce.Bot, ce.OrigRoomID, ce.EventID)
 				return
 			}
 			var ts time.Time
@@ -74,6 +77,22 @@ var cmdLocate = &commands.FullHandler{
 			client.dispatchLocationMessage(wuid, loc, ts)
 		}()
 	},
+}
+
+// sendLocateFailure sends a notice to the Matrix room when a !locate command
+// produced no result — either the watch didn't respond via FCM and there is no
+// cached location available (watch likely offline or out of coverage).
+// Uses context.Background() because ce.Ctx may already be cancelled by the
+// time the 60s goroutine timer fires.
+func sendLocateFailure(bot bridgev2.MatrixAPI, roomID id.RoomID, cmdEventID id.EventID) {
+	content := event.MessageEventContent{
+		MsgType: event.MsgNotice,
+		Body:    "📍 No location available — watch may be offline or out of coverage.",
+		RelatesTo: &event.RelatesTo{
+			InReplyTo: &event.InReplyTo{EventID: cmdEventID},
+		},
+	}
+	_, _ = bot.SendMessage(context.Background(), roomID, event.EventMessage, &event.Content{Parsed: &content}, nil)
 }
 
 var cmdStickers = &commands.FullHandler{
