@@ -699,6 +699,12 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Addr       string  `json:"addr"`
 			Battery    int     `json:"battery"`
 			IsCharging int     `json:"is_charging"`
+			// Call log fields present in call_log payloads.
+			// call_type is an integer: 1=outgoing, 2=incoming, 3=missed.
+			CallType   int    `json:"call_type"`
+			CallName   string `json:"call_name"`
+			CallNumber string `json:"call_number"`
+			Duration   int    `json:"duration"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
@@ -881,6 +887,18 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			locMap["is_charging"] = ct.IsCharging != 0
 		}
 		dataJSON, _ = json.Marshal(locMap)
+	} else if ct.MsgType == "call_log" {
+		// Build call log data in the same format formatCallLog expects.
+		// FCM uses integer call_type (1=outgoing,2=incoming,3=missed); store as string.
+		callMap := map[string]any{
+			"call_type": callTypeIntToString(ct.CallType),
+			"call_name": ct.CallName,
+			"duration":  ct.Duration,
+		}
+		if ct.CallNumber != "" {
+			callMap["call_number"] = ct.CallNumber
+		}
+		dataJSON, _ = json.Marshal(callMap)
 	} else if ct.Text != "" {
 		dataJSON, _ = json.Marshal(ct.Text)
 	}
@@ -916,8 +934,26 @@ func fcmMsgTypeToXplora(fcmType string) string {
 		return "EMOTICON"
 	case "location_update":
 		return "TRACKER_UPDATE"
+	case "call_log":
+		return "CALL_LOG"
 	default:
 		return fcmType
+	}
+}
+
+// callTypeIntToString maps the integer call_type field in FCM call_log payloads
+// to the string values expected by formatCallLog.
+// Observed: 1=outgoing (watch→contact). 2 and 3 are guessed as incoming/missed.
+func callTypeIntToString(t int) string {
+	switch t {
+	case 1:
+		return "outgoing"
+	case 2:
+		return "incoming"
+	case 3:
+		return "missed"
+	default:
+		return fmt.Sprintf("unknown_%d", t)
 	}
 }
 

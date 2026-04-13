@@ -307,44 +307,69 @@ func extractMessageText(msg xplora.ChatMessage) string {
 }
 
 // formatCallLog parses CALL_LOG data and returns a human-readable description.
-// Expected fields: call_type ("incoming"/"outgoing"/"missed"), call_name, duration (seconds).
-// Both snake_case and camelCase field names are supported (different API versions differ).
+// call_type may be a string ("incoming"/"outgoing"/"missed") from the polling API,
+// or an integer (1=outgoing, 2=incoming, 3=missed) from FCM payloads — both handled.
+// Both snake_case and camelCase field names are supported.
 func formatCallLog(data json.RawMessage) string {
 	var d struct {
-		CallType   string `json:"call_type"`
+		CallType   any    `json:"call_type"`  // string or int depending on path
 		CallName   string `json:"call_name"`
 		Duration   int    `json:"duration"`
-		CallTypeCC string `json:"callType"`
+		CallTypeCC any    `json:"callType"`   // camelCase variant
 		CallNameCC string `json:"callName"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
 		return ""
 	}
-	if d.CallType == "" {
-		d.CallType = d.CallTypeCC
+	callType := resolveCallType(d.CallType)
+	if callType == "" {
+		callType = resolveCallType(d.CallTypeCC)
 	}
-	if d.CallName == "" {
-		d.CallName = d.CallNameCC
+	callName := d.CallName
+	if callName == "" {
+		callName = d.CallNameCC
 	}
-	if d.CallName == "" {
+	if callName == "" {
 		return fmt.Sprintf("[Call: %s]", string(data))
 	}
-	switch d.CallType {
+	switch callType {
 	case "incoming":
 		if d.Duration > 0 {
-			return fmt.Sprintf("[Incoming call from %s (%ds)]", d.CallName, d.Duration)
+			return fmt.Sprintf("📞 Incoming call from %s (%ds)", callName, d.Duration)
 		}
-		return fmt.Sprintf("[Incoming call from %s]", d.CallName)
+		return fmt.Sprintf("📞 Incoming call from %s", callName)
 	case "outgoing":
 		if d.Duration > 0 {
-			return fmt.Sprintf("[Call to %s (%ds)]", d.CallName, d.Duration)
+			return fmt.Sprintf("📞 Call to %s (%ds)", callName, d.Duration)
 		}
-		return fmt.Sprintf("[Call to %s]", d.CallName)
+		return fmt.Sprintf("📞 Call to %s (not answered)", callName)
 	case "missed":
-		return fmt.Sprintf("[Missed call from %s]", d.CallName)
+		return fmt.Sprintf("📞 Missed call from %s", callName)
 	default:
-		return fmt.Sprintf("[Call with %s]", d.CallName)
+		if d.Duration > 0 {
+			return fmt.Sprintf("📞 Call with %s (%ds)", callName, d.Duration)
+		}
+		return fmt.Sprintf("📞 Call with %s", callName)
 	}
+}
+
+// resolveCallType normalises call_type to a string regardless of whether it
+// arrived as a JSON string ("outgoing") or integer (1) from FCM payloads.
+func resolveCallType(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64: // JSON numbers unmarshal to float64
+		switch int(t) {
+		case 1:
+			return "outgoing"
+		case 2:
+			return "incoming"
+		case 3:
+			return "missed"
+		}
+	}
+	return ""
 }
 
 // formatEmoticon parses EMOTICON data and returns the corresponding Unicode emoji.
