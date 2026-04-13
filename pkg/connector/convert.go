@@ -257,6 +257,13 @@ func extractMessageText(msg xplora.ChatMessage) string {
 			if text := formatEmoticon(msg.Data); text != "" {
 				return text
 			}
+		case "LOW_BATTERY":
+			var d struct {
+				Battery int `json:"battery"`
+			}
+			if err := json.Unmarshal(msg.Data, &d); err == nil && d.Battery > 0 {
+				return fmt.Sprintf("🔋 Low battery: %d%%", d.Battery)
+			}
 		}
 
 		// data may be a plain JSON string
@@ -295,7 +302,7 @@ func extractMessageText(msg xplora.ChatMessage) string {
 	case "LEAVE_SAFE_ZONE":
 		return "[Left safe zone]"
 	case "LOW_BATTERY":
-		return "[Low battery]"
+		return "🔋 Low battery"
 	case "TRACKER_UPDATE":
 		return "[Location update]"
 	default:
