@@ -62,6 +62,12 @@ type XploraClient struct {
 	// Called by Disconnect() so that logout+re-login without restart does not
 	// leave a stale listener competing with the new one.
 	fcmCancel context.CancelFunc
+	// fcmWg tracks the FCM listener goroutine so callers can wait for it to
+	// fully exit before starting a new one. Without this barrier, re-login
+	// without a restart can leave the old goroutine holding a TCP connection to
+	// Google MCS with the same androidId, causing "connection reset by peer" on
+	// the new listener before the old one winds down.
+	fcmWg sync.WaitGroup
 
 	// recentSentMu guards recentSents. Used to suppress FCM echoes of messages
 	// we just sent from Matrix (Xplora always echoes sends back via FCM).
@@ -112,6 +118,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	if c.fcmCancel != nil {
 		c.fcmCancel()
 		c.fcmCancel = nil
+		c.fcmWg.Wait() // block until old goroutine has fully exited
 	}
 	c.stopPolling()
 
@@ -239,7 +246,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	go c.pollAllWatches(fcmCtx)
 
 	// Start FCM listener in background with exponential backoff.
+	c.fcmWg.Add(1)
 	go func() {
+		defer c.fcmWg.Done()
 		defer fcmCancel()
 		backoff := 5 * time.Second
 		const maxBackoff = 5 * time.Minute
@@ -305,6 +314,7 @@ func (c *XploraClient) Disconnect() {
 	c.stopPolling()
 	if c.fcmCancel != nil {
 		c.fcmCancel()
+		c.fcmWg.Wait()
 	}
 }
 
@@ -1475,8 +1485,16 @@ func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
 	}
 	c.log.Warn().Err(err).Msg("Xplora auth error detected mid-session, attempting token refresh")
 	if rfErr := c.tryRefreshToken(ctx); rfErr != nil {
-		c.log.Warn().Err(rfErr).Msg("Token refresh failed mid-session, stopping polling")
+		c.log.Warn().Err(rfErr).Msg("Token refresh failed mid-session, stopping polling and FCM")
 		c.stopPolling()
+		// Cancel FCM so it stops cycling connect/RST/retry while the session is
+		// dead. Without this, the FCM goroutine keeps trying to reconnect and
+		// alternates TRANSIENT_DISCONNECT with BAD_CREDENTIALS in the bridge
+		// state, and may contribute to Google rate-limiting the androidId.
+		if c.fcmCancel != nil {
+			c.fcmCancel()
+			c.fcmCancel = nil
+		}
 		c.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateBadCredentials,
 			Error:      "xplora-auth-error",
