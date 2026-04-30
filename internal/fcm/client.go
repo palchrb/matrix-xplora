@@ -89,6 +89,12 @@ type Client struct {
 	httpClient  *http.Client
 	mu          sync.Mutex
 
+	// credSaveMu guards pendingCredSave and credSaveTimer so addPersistentID
+	// can schedule a debounced write without holding the credentials lock.
+	credSaveMu      sync.Mutex
+	pendingCredSave bool
+	credSaveTimer   *time.Timer
+
 	// dialMCS is overridable for testing (returns a conn to MCS server).
 	dialMCS func(ctx context.Context) (io.ReadWriteCloser, error)
 
@@ -105,7 +111,7 @@ func NewClient(sessionDir string, opts ...Option) *Client {
 	c := &Client{
 		sessionDir: sessionDir,
 		logger:     slog.Default(),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -336,7 +342,11 @@ func (c *Client) Listen(ctx context.Context) error {
 		c.handleMCSMessage(persistentID, payload, appData)
 	}
 
-	return mcs.connect(ctx)
+	err = mcs.connect(ctx)
+	// Flush any pending credentials write so persistent IDs accumulated during
+	// this session are not lost on shutdown or reconnect.
+	c.flushSave()
+	return err
 }
 
 // dialMCSConn dials mtalk.google.com:5228 over TLS, or uses the test hook.
@@ -423,7 +433,10 @@ func parseDataMessage(data []byte) (Event, error) {
 // maxPersistentIDs is the maximum number of persistent IDs to keep.
 const maxPersistentIDs = 200
 
-// addPersistentID appends a persistent ID and saves credentials.
+// addPersistentID appends a persistent ID and schedules a debounced credentials
+// write. The actual write is deferred up to 30 seconds so that a burst of
+// incoming FCM pushes (e.g. catch-up after reconnect) does not cause one
+// write per message. flushSave() forces an immediate write on shutdown.
 func (c *Client) addPersistentID(id string) {
 	if id == "" {
 		return
@@ -439,8 +452,43 @@ func (c *Client) addPersistentID(id string) {
 	}
 	c.mu.Unlock()
 
-	if err := c.saveCredentials(); err != nil {
-		c.logger.Error("Failed to save persistent IDs", "error", err)
+	c.scheduleSave()
+}
+
+// scheduleSave arms a 30-second timer to write credentials to disk. If a
+// timer is already pending it is left as-is (the write will happen soon).
+func (c *Client) scheduleSave() {
+	c.credSaveMu.Lock()
+	defer c.credSaveMu.Unlock()
+	if c.pendingCredSave {
+		return
+	}
+	c.pendingCredSave = true
+	c.credSaveTimer = time.AfterFunc(30*time.Second, func() {
+		c.credSaveMu.Lock()
+		c.pendingCredSave = false
+		c.credSaveMu.Unlock()
+		if err := c.saveCredentials(); err != nil {
+			c.logger.Error("Failed to save FCM credentials (debounced)", "error", err)
+		}
+	})
+}
+
+// flushSave cancels any pending debounce timer and writes credentials
+// immediately. Called when Listen() returns so that the last batch of
+// persistent IDs is not lost on shutdown.
+func (c *Client) flushSave() {
+	c.credSaveMu.Lock()
+	pending := c.pendingCredSave
+	if pending && c.credSaveTimer != nil {
+		c.credSaveTimer.Stop()
+	}
+	c.pendingCredSave = false
+	c.credSaveMu.Unlock()
+	if pending {
+		if err := c.saveCredentials(); err != nil {
+			c.logger.Error("Failed to flush FCM credentials", "error", err)
+		}
 	}
 }
 
@@ -475,22 +523,32 @@ func (c *Client) loadCredentials() error {
 	return nil
 }
 
-// saveCredentials writes FCM credentials to disk.
+// saveCredentials writes FCM credentials to disk atomically (write to a temp
+// file then rename) so a crash mid-write cannot produce a corrupt credentials
+// file.
 func (c *Client) saveCredentials() error {
+	c.mu.Lock()
 	if c.credentials == nil {
+		c.mu.Unlock()
 		return fmt.Errorf("no credentials to save")
 	}
-	if err := os.MkdirAll(filepath.Dir(c.credentialsPath()), 0o755); err != nil {
-		return fmt.Errorf("creating session directory: %w", err)
-	}
 	data, err := json.MarshalIndent(c.credentials, "", "  ")
+	c.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("serializing FCM credentials: %w", err)
 	}
-	if err := os.WriteFile(c.credentialsPath(), data, 0o600); err != nil {
-		return fmt.Errorf("writing FCM credentials: %w", err)
+	dest := c.credentialsPath()
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("creating session directory: %w", err)
 	}
-	c.logger.Debug("Saved FCM credentials", "path", c.credentialsPath())
+	tmp := dest + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("writing FCM credentials (tmp): %w", err)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return fmt.Errorf("renaming FCM credentials: %w", err)
+	}
+	c.logger.Debug("Saved FCM credentials", "path", dest)
 	return nil
 }
 
@@ -550,4 +608,3 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen]
 }
-
