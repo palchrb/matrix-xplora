@@ -45,7 +45,7 @@ func WithHTTPClient(hc *http.Client) Option {
 func NewClient(auth *Auth, opts ...Option) *Client {
 	c := &Client{
 		auth:       auth,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
 		opt(c)

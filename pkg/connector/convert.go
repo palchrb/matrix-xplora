@@ -230,7 +230,13 @@ func (c *XploraClient) bridgeIncomingMedia(
 				Waveform: waveform,
 			}
 		} else {
-			content.MSC1767Audio = &event.MSC1767Audio{Waveform: []int{}}
+			// Transcode failed; data is still raw AMR. Derive frame-accurate duration.
+			amrDurMS := AMRNBDurationSec(data) * 1000
+			content.Info.Duration = amrDurMS
+			content.MSC1767Audio = &event.MSC1767Audio{
+				Duration: amrDurMS,
+				Waveform: []int{},
+			}
 		}
 	}
 
@@ -283,8 +289,10 @@ func extractMessageText(msg xplora.ChatMessage) string {
 			}
 		}
 
-		// Return raw data for unknown structure so nothing is silently lost
-		return fmt.Sprintf("[%s: %s]", msgType, string(msg.Data))
+		// Unknown data structure — do not expose raw JSON to Matrix (it may contain
+		// PII such as phone numbers or addresses). The raw payload is visible in
+		// server logs at debug level via handleFCMMessage / pollWatch.
+		return fmt.Sprintf("[%s]", msgType)
 	}
 
 	// No data — use human-readable type label as fallback
@@ -319,10 +327,10 @@ func extractMessageText(msg xplora.ChatMessage) string {
 // Both snake_case and camelCase field names are supported.
 func formatCallLog(data json.RawMessage) string {
 	var d struct {
-		CallType   any    `json:"call_type"`  // string or int depending on path
+		CallType   any    `json:"call_type"` // string or int depending on path
 		CallName   string `json:"call_name"`
 		Duration   int    `json:"duration"`
-		CallTypeCC any    `json:"callType"`   // camelCase variant
+		CallTypeCC any    `json:"callType"` // camelCase variant
 		CallNameCC string `json:"callName"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {

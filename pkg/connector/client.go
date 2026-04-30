@@ -58,9 +58,11 @@ type XploraClient struct {
 	pollCancel context.CancelFunc
 	pollMu     sync.Mutex
 
+	// fcmMu guards fcmCancel to prevent concurrent access from Connect,
+	// Disconnect, and handleAPIError.
+	fcmMu sync.Mutex
 	// fcmCancel cancels the FCM listener goroutine started in Connect().
-	// Called by Disconnect() so that logout+re-login without restart does not
-	// leave a stale listener competing with the new one.
+	// Always accessed under fcmMu.
 	fcmCancel context.CancelFunc
 	// fcmWg tracks the FCM listener goroutine so callers can wait for it to
 	// fully exit before starting a new one. Without this barrier, re-login
@@ -68,6 +70,21 @@ type XploraClient struct {
 	// Google MCS with the same androidId, causing "connection reset by peer" on
 	// the new listener before the old one winds down.
 	fcmWg sync.WaitGroup
+
+	// childrenMu guards c.meta.Children. Readers hold RLock; writers
+	// (mergeChildren, migrateChildAvatarURLs, FCMID learning) hold Lock.
+	childrenMu sync.RWMutex
+
+	// refreshMu serialises concurrent tryRefreshToken calls so that a
+	// health-check ticker, a polling error, and a proactive refresh cannot
+	// race and invalidate each other's refresh tokens.
+	refreshMu sync.Mutex
+
+	// lifetimeCtx is cancelled by Disconnect to bound background goroutines
+	// (cmdLocate fallback GQL call, 25-second locate-window timer) to the
+	// session lifetime so they don't outlive logout.
+	lifetimeCtx    context.Context
+	lifetimeCancel context.CancelFunc
 
 	// recentSentMu guards recentSents. Used to suppress FCM echoes of messages
 	// we just sent from Matrix (Xplora always echoes sends back via FCM).
@@ -94,16 +111,19 @@ type XploraClient struct {
 var _ bridgev2.NetworkAPI = (*XploraClient)(nil)
 
 func newXploraClient(xc *XploraConnector, login *bridgev2.UserLogin, auth *xplora.Auth, gql *xplora.Client, meta *UserLoginMetadata) *XploraClient {
+	lifetimeCtx, lifetimeCancel := context.WithCancel(context.Background())
 	return &XploraClient{
-		connector:         xc,
-		userLogin:         login,
-		meta:              meta,
-		auth:              auth,
-		gql:               gql,
-		log:               login.Log.With().Str("component", "xplora-client").Logger(),
+		connector:                 xc,
+		userLogin:                 login,
+		meta:                      meta,
+		auth:                      auth,
+		gql:                       gql,
+		log:                       login.Log.With().Str("component", "xplora-client").Logger(),
 		recentLocateChans:         make(map[string]chan struct{}),
 		recentLocateBestFix:       make(map[string]pendingLocateFix),
 		recentLocateSuppressUntil: make(map[string]int64),
+		lifetimeCtx:               lifetimeCtx,
+		lifetimeCancel:            lifetimeCancel,
 	}
 }
 
@@ -115,9 +135,12 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	// Without this, logout+re-login without a bridge restart leaves the old
 	// goroutine running. Both listeners would connect to Google FCM with the
 	// same androidId/securityToken, causing repeated "connection reset by peer".
-	if c.fcmCancel != nil {
-		c.fcmCancel()
-		c.fcmCancel = nil
+	c.fcmMu.Lock()
+	oldCancel := c.fcmCancel
+	c.fcmCancel = nil
+	c.fcmMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
 		c.fcmWg.Wait() // block until old goroutine has fully exited
 	}
 	c.stopPolling()
@@ -163,6 +186,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		c.log.Debug().Str("my_info_id", myInfo.ID).Str("my_info_name", name).Msg("GetMyInfo result (parent user ID format)")
 		c.mergeChildren(ctx, myInfo.Children)
 	}
+	c.childrenMu.RLock()
 	for _, w := range c.meta.Children {
 		c.log.Debug().
 			Str("child_uid", w.ChildUID()).
@@ -171,6 +195,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			Str("name", w.ChildName()).
 			Msg("Known child at connect")
 	}
+	c.childrenMu.RUnlock()
 
 	// Create the FCM client early so we can load any cached credentials from
 	// disk before syncWatches runs.
@@ -237,7 +262,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	// Create a cancellable context for the FCM listener so Disconnect() can
 	// stop it cleanly without affecting the caller's context.
 	fcmCtx, fcmCancel := context.WithCancel(context.Background())
+	c.fcmMu.Lock()
 	c.fcmCancel = fcmCancel
+	c.fcmMu.Unlock()
 
 	// Catch-up poll: fetch any messages that arrived while the bridge was
 	// offline. pollWatch uses LastMsgID as a cursor, so only new messages
@@ -312,10 +339,15 @@ func (c *XploraClient) Connect(ctx context.Context) {
 // connection started by a subsequent re-login without a bridge restart.
 func (c *XploraClient) Disconnect() {
 	c.stopPolling()
-	if c.fcmCancel != nil {
-		c.fcmCancel()
+	c.fcmMu.Lock()
+	cancel := c.fcmCancel
+	c.fcmCancel = nil
+	c.fcmMu.Unlock()
+	if cancel != nil {
+		cancel()
 		c.fcmWg.Wait()
 	}
+	c.lifetimeCancel()
 }
 
 // ensureSpaceAvatar updates the space room's m.room.avatar to match the
@@ -381,12 +413,14 @@ func (c *XploraClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (
 	}
 	// Include ghost profile info so the avatar is set when the ghost joins.
 	ghostInfo := &bridgev2.UserInfo{Name: &name}
+	c.childrenMu.RLock()
 	for _, w := range c.meta.Children {
 		if w.ChildUID() == meta.WUID && w.AvatarURL != "" {
 			ghostInfo.Avatar = makeURLAvatar(w.AvatarURL)
 			break
 		}
 	}
+	c.childrenMu.RUnlock()
 	members := []bridgev2.ChatMember{
 		{
 			EventSender: bridgev2.EventSender{IsFromMe: true},
@@ -407,6 +441,8 @@ func (c *XploraClient) GetChatInfo(_ context.Context, portal *bridgev2.Portal) (
 // GetUserInfo returns ghost profile data for a child's watch.
 func (c *XploraClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	wuid := string(ghost.ID)
+	c.childrenMu.RLock()
+	defer c.childrenMu.RUnlock()
 	for _, w := range c.meta.Children {
 		if w.ChildUID() == wuid {
 			info := &bridgev2.UserInfo{Name: ptrStr(w.ChildName())}
@@ -643,6 +679,7 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 		// directly. Instead we check whether the sender is the known child:
 		// if not, the sender must be the parent (isFromMe = true).
 		isFromChild := false
+		c.childrenMu.RLock()
 		for _, w := range c.meta.Children {
 			if w.ChildUID() == wuid &&
 				chatMsg.Sender != nil &&
@@ -652,6 +689,7 @@ func (c *XploraClient) handleFCMMessage(msg fcm.NewMessage) {
 				break
 			}
 		}
+		c.childrenMu.RUnlock()
 		isFromMe := !isFromChild
 		// Handle TRACKER_UPDATE (location) deduplication for !locate:
 		// - Collect window (25s from first fix): store best fix, dispatch after window.
@@ -756,6 +794,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		msgIDStr := fmt.Sprintf("%d", ec.MsgID)
 		createSec := ec.Time / 1000
 		// Resolve wuid using the same logic as the main path.
+		c.childrenMu.RLock()
 		wuid := ""
 		matchIdxEmoticon := -1
 		for i, w := range c.meta.Children {
@@ -771,6 +810,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			wuid = c.meta.Children[0].ChildUID()
 			matchIdxEmoticon = 0
 		}
+		c.childrenMu.RUnlock()
 		if wuid == "" {
 			c.log.Warn().RawJSON("fcm_payload", raw).Msg("FCM chat_emoticon: cannot match to child, dropping")
 			return xplora.ChatMessage{}, "", 0, false
@@ -786,17 +826,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 				ecFCMIDCandidate = ec.Sender
 			}
 		}
-		if matchIdxEmoticon >= 0 && ecFCMIDCandidate != "" && ecFCMIDCandidate != c.meta.Children[matchIdxEmoticon].FCMID {
-			oldFCMID := c.meta.Children[matchIdxEmoticon].FCMID
-			c.meta.Children[matchIdxEmoticon].FCMID = ecFCMIDCandidate
-			ctx := c.userLogin.Log.WithContext(context.Background())
-			c.userLogin.Save(ctx)
-			if oldFCMID == "" {
-				c.log.Debug().Str("wuid", wuid).Str("fcm_id", ecFCMIDCandidate).Msg("Learned FCM user ID for child (emoticon)")
-			} else {
-				c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", ecFCMIDCandidate).Msg("Corrected wrong FCM user ID for child (emoticon)")
-			}
-		}
+		c.updateChildFCMID(matchIdxEmoticon, ecFCMIDCandidate, wuid, " (emoticon)")
 		var senderRef *xplora.UserRef
 		if ec.Sender != "" {
 			senderRef = &xplora.UserRef{ID: ec.Sender}
@@ -817,6 +847,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	// FCM messages use the child's user ACCOUNT ID (a shorter hex string).
 	// We match against both the stored ChildUID and any previously learned FCMID.
 	// On first match we record the FCMID so subsequent messages match immediately.
+	c.childrenMu.RLock()
 	wuid := ""
 	matchIdx := -1
 	for i, w := range c.meta.Children {
@@ -830,9 +861,21 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 	}
 	// Fallback: if we couldn't match and there's exactly one child, assume the
 	// message is for them and learn their FCM user ID from the payload.
+	singleChildFallback := false
 	if wuid == "" && len(c.meta.Children) == 1 {
 		wuid = c.meta.Children[0].ChildUID()
 		matchIdx = 0
+		singleChildFallback = true
+	}
+	var knownUIDs []string
+	if wuid == "" {
+		knownUIDs = make([]string, 0, len(c.meta.Children))
+		for _, w := range c.meta.Children {
+			knownUIDs = append(knownUIDs, w.ChildUID())
+		}
+	}
+	c.childrenMu.RUnlock()
+	if singleChildFallback {
 		c.log.Debug().
 			Str("sender", ct.Sender).
 			Str("receiver", ct.Receiver).
@@ -840,10 +883,6 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			Msg("FCM direct parse: single child, assuming message is for them")
 	}
 	if wuid == "" {
-		knownUIDs := make([]string, 0, len(c.meta.Children))
-		for _, w := range c.meta.Children {
-			knownUIDs = append(knownUIDs, w.ChildUID())
-		}
 		c.log.Debug().
 			Str("sender", ct.Sender).
 			Str("receiver", ct.Receiver).
@@ -866,17 +905,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 				fcmIDCandidate = ct.Sender
 			}
 		}
-		if fcmIDCandidate != "" && fcmIDCandidate != c.meta.Children[matchIdx].FCMID {
-			oldFCMID := c.meta.Children[matchIdx].FCMID
-			c.meta.Children[matchIdx].FCMID = fcmIDCandidate
-			ctx := c.userLogin.Log.WithContext(context.Background())
-			c.userLogin.Save(ctx)
-			if oldFCMID == "" {
-				c.log.Debug().Str("wuid", wuid).Str("fcm_id", fcmIDCandidate).Msg("Learned FCM user ID for child")
-			} else {
-				c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", fcmIDCandidate).Msg("Corrected wrong FCM user ID for child")
-			}
-		}
+		c.updateChildFCMID(matchIdx, fcmIDCandidate, wuid, "")
 	}
 
 	msgIDStr := fmt.Sprintf("%d", ct.MsgID)
@@ -893,7 +922,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			"addr": ct.Addr,
 		}
 		if ct.Battery > 0 {
-			locMap["battery"]     = ct.Battery
+			locMap["battery"] = ct.Battery
 			locMap["is_charging"] = ct.IsCharging != 0
 		}
 		dataJSON, _ = json.Marshal(locMap)
@@ -1065,7 +1094,11 @@ func (c *XploraClient) updateLocateBestFix(wuid string, msg xplora.ChatMessage, 
 
 	if isFirst {
 		go func() {
-			time.Sleep(25 * time.Second)
+			select {
+			case <-time.After(25 * time.Second):
+			case <-c.lifetimeCtx.Done():
+				return
+			}
 			c.dispatchBestLocateFix(wuid)
 		}()
 	}
@@ -1117,7 +1150,7 @@ func (c *XploraClient) dispatchLocationMessage(wuid string, loc *xplora.Location
 		"addr": addr,
 	}
 	if loc.Battery > 0 {
-		locMap["battery"]     = loc.Battery
+		locMap["battery"] = loc.Battery
 		locMap["is_charging"] = loc.IsCharging
 	}
 	dataJSON, _ := json.Marshal(locMap)
@@ -1212,9 +1245,15 @@ func (c *XploraClient) pollLoop(ctx context.Context) {
 
 // pollAllWatches fetches new messages for all linked watches.
 func (c *XploraClient) pollAllWatches(ctx context.Context) {
+	c.childrenMu.RLock()
 	c.log.Debug().Int("count", len(c.meta.Children)).Msg("Polling Xplora watches")
+	wuids := make([]string, 0, len(c.meta.Children))
 	for _, w := range c.meta.Children {
-		c.pollWatch(ctx, w.ChildUID())
+		wuids = append(wuids, w.ChildUID())
+	}
+	c.childrenMu.RUnlock()
+	for _, wuid := range wuids {
+		c.pollWatch(ctx, wuid)
 	}
 }
 
@@ -1274,6 +1313,14 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		// In GetChats responses the sender.id is the Xplora user ID.
 		// The child's user ID equals wuid, so we can reliably identify direction.
 		isFromChild := msg.Sender != nil && msg.Sender.ID == wuid
+		// System messages (location, battery, call log) carry no Sender field but
+		// are always generated by the watch; treat them as originating from the child.
+		if !isFromChild && msg.Sender == nil {
+			switch derefStr(msg.Type) {
+			case "TRACKER_UPDATE", "LOW_BATTERY", "CALL_LOG":
+				isFromChild = true
+			}
+		}
 		c.log.Debug().
 			Str("wuid", wuid).
 			Str("msg_id", msg.MsgID).
@@ -1332,8 +1379,12 @@ func (c *XploraClient) dispatchChatMessage(wuid string, msg xplora.ChatMessage, 
 
 // syncWatches ensures a portal exists for each child watch stored in metadata.
 func (c *XploraClient) syncWatches(ctx context.Context) {
+	c.childrenMu.RLock()
 	c.log.Info().Int("count", len(c.meta.Children)).Msg("Syncing watches from metadata")
-	for _, w := range c.meta.Children {
+	watches := make([]xplora.WatchInfo, len(c.meta.Children))
+	copy(watches, c.meta.Children)
+	c.childrenMu.RUnlock()
+	for _, w := range watches {
 		c.log.Info().
 			Str("wuid", w.ChildUID()).
 			Str("name", w.ChildName()).
@@ -1348,7 +1399,8 @@ func (c *XploraClient) syncWatches(ctx context.Context) {
 // New children are appended and the login metadata is persisted so that bridge
 // restarts pick up any watches added to the account since the last sign-in.
 func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEntry) {
-	added := 0
+	var added []xplora.WatchInfo
+	c.childrenMu.Lock()
 	for _, entry := range fresh {
 		if entry.Ward == nil || entry.Ward.ID == "" {
 			continue
@@ -1373,10 +1425,13 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 			w.AvatarURL = "https://api.myxplora.com/file?id=" + entry.Ward.File.ID
 		}
 		c.meta.Children = append(c.meta.Children, w)
-		added++
+		added = append(added, w)
+	}
+	c.childrenMu.Unlock()
+	for _, w := range added {
 		c.log.Info().Str("child_uid", w.ChildUID()).Str("name", w.ChildName()).Msg("New child detected at connect, added to metadata")
 	}
-	if added > 0 {
+	if len(added) > 0 {
 		c.userLogin.Save(ctx)
 	}
 }
@@ -1388,13 +1443,18 @@ func (c *XploraClient) mergeChildren(ctx context.Context, fresh []xplora.ChildEn
 //
 // The file ID is the last underscore-delimited segment.
 func (c *XploraClient) migrateChildAvatarURLs(ctx context.Context) {
+	c.childrenMu.Lock()
 	changed := false
 	for i, w := range c.meta.Children {
 		if !strings.Contains(w.AvatarURL, "fetch_icon") {
 			continue
 		}
-		// Extract file ID: last segment after the final '_'
-		p := w.AvatarURL[strings.LastIndex(w.AvatarURL, "USER-ICON_")+len("USER-ICON_"):]
+		// Extract file ID: last segment after the final '_' in "USER-ICON_<id>_<fileID>".
+		idx := strings.LastIndex(w.AvatarURL, "USER-ICON_")
+		if idx < 0 {
+			continue
+		}
+		p := w.AvatarURL[idx+len("USER-ICON_"):]
 		parts := strings.SplitN(p, "_", 2)
 		if len(parts) != 2 || parts[1] == "" {
 			continue
@@ -1408,6 +1468,7 @@ func (c *XploraClient) migrateChildAvatarURLs(ctx context.Context) {
 		c.meta.Children[i].AvatarURL = newURL
 		changed = true
 	}
+	c.childrenMu.Unlock()
 	if changed {
 		c.userLogin.Save(ctx)
 	}
@@ -1491,9 +1552,13 @@ func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
 		// dead. Without this, the FCM goroutine keeps trying to reconnect and
 		// alternates TRANSIENT_DISCONNECT with BAD_CREDENTIALS in the bridge
 		// state, and may contribute to Google rate-limiting the androidId.
-		if c.fcmCancel != nil {
-			c.fcmCancel()
-			c.fcmCancel = nil
+		c.fcmMu.Lock()
+		fcmCancel := c.fcmCancel
+		c.fcmCancel = nil
+		c.fcmMu.Unlock()
+		if fcmCancel != nil {
+			fcmCancel()
+			c.fcmWg.Wait()
 		}
 		c.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateBadCredentials,
@@ -1506,9 +1571,36 @@ func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
 	return true
 }
 
+// updateChildFCMID atomically updates c.meta.Children[matchIdx].FCMID to candidate
+// if it differs from the current value. Logging and save happen outside the lock.
+// logSuffix (e.g. " (emoticon)") is appended to log messages to identify the call site.
+func (c *XploraClient) updateChildFCMID(matchIdx int, candidate, wuid, logSuffix string) {
+	if matchIdx < 0 || candidate == "" {
+		return
+	}
+	c.childrenMu.Lock()
+	if matchIdx >= len(c.meta.Children) || candidate == c.meta.Children[matchIdx].FCMID {
+		c.childrenMu.Unlock()
+		return
+	}
+	oldFCMID := c.meta.Children[matchIdx].FCMID
+	c.meta.Children[matchIdx].FCMID = candidate
+	c.childrenMu.Unlock()
+
+	ctx := c.userLogin.Log.WithContext(context.Background())
+	c.userLogin.Save(ctx)
+	if oldFCMID == "" {
+		c.log.Debug().Str("wuid", wuid).Str("fcm_id", candidate).Msgf("Learned FCM user ID for child%s", logSuffix)
+	} else {
+		c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", candidate).Msgf("Corrected wrong FCM user ID for child%s", logSuffix)
+	}
+}
+
 // tryRefreshToken exchanges the stored refresh token for a new access token
 // and saves the updated credentials to disk.
 func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
 	uid := c.auth.UserID()
 	refreshToken := c.auth.RefreshToken()
 	if uid == "" || refreshToken == "" {

@@ -61,8 +61,9 @@ var cmdLocate = &commands.FullHandler{
 				return
 			case <-time.After(60 * time.Second):
 			}
-			// Fallback: show the last known cached location.
-			loc, err := client.gql.GetWatchLastLocation(context.Background(), wuid)
+			// Fallback: show the last known cached location. Use the client
+			// lifetime context so a stalled HTTP request doesn't outlive logout.
+			loc, err := client.gql.GetWatchLastLocation(client.lifetimeCtx, wuid)
 			if err != nil || loc == nil || (loc.Lat == 0 && loc.Lng == 0) {
 				client.log.Debug().Str("wuid", wuid).Msg("locate: no location available after FCM timeout")
 				sendLocateFailure(ce.Bot, ce.OrigRoomID, ce.EventID)
