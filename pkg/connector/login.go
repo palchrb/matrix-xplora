@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/palchrb/matrix-xplora/internal/xplora"
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 )
@@ -76,13 +77,17 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("creating session directory: %w", err)
 	}
 
+	log := zerolog.Ctx(ctx)
 	auth := xplora.NewAuth(sessDir)
 	gqlClient := xplora.NewClient(auth)
 
+	log.Info().Str("country_code", countryCode).Str("phone", phone).Msg("Attempting Xplora sign-in")
 	authResp, err := gqlClient.SignIn(ctx, countryCode, phone, password)
 	if err != nil {
+		log.Error().Err(err).Str("country_code", countryCode).Str("phone", phone).Msg("Xplora sign-in failed")
 		return nil, fmt.Errorf("Xplora login failed: %w", err)
 	}
+	log.Info().Str("user_id", authResp.User.ID).Msg("Xplora sign-in succeeded")
 	if authResp.Token == "" {
 		return nil, fmt.Errorf("Xplora login returned empty token")
 	}

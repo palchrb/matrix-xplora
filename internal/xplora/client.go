@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -133,7 +135,9 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 		return nil, fmt.Errorf("xplora: read response: %w", err)
 	}
 
+	log := zerolog.Ctx(ctx)
 	if resp.StatusCode != http.StatusOK {
+		log.Error().Int("http_status", resp.StatusCode).Str("body", string(body)).Msg("xplora: unexpected HTTP status")
 		return nil, fmt.Errorf("xplora: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -143,6 +147,7 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 	}
 
 	if len(gqlResp.Errors) > 0 {
+		log.Error().Str("code", gqlResp.Errors[0].Code).Str("message", gqlResp.Errors[0].Message).Str("body", string(body)).Msg("xplora: GraphQL error")
 		return nil, fmt.Errorf("xplora: %w", gqlResp.Errors[0])
 	}
 
