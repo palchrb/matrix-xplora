@@ -96,7 +96,6 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 	return &result.ReadMyInfo, nil
 }
 
-
 // GetChats fetches paginated chat messages for a given watch's child user ID.
 // msgID optionally filters to messages after a given message ID.
 func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, error) {

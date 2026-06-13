@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -80,8 +81,24 @@ func (c *Client) backdoorAuth() string {
 
 // graphQLRequest is the JSON body for a GraphQL request.
 type graphQLRequest struct {
-	Query     string         `json:"query"`
-	Variables map[string]any `json:"variables,omitempty"`
+	Query         string         `json:"query"`
+	Variables     map[string]any `json:"variables,omitempty"`
+	OperationName string         `json:"operationName,omitempty"`
+}
+
+// operationNameRe extracts the operation name from a GraphQL document, e.g.
+// "signInWithEmailOrPhone" from "mutation signInWithEmailOrPhone(...)".
+var operationNameRe = regexp.MustCompile(`(?s)\b(?:query|mutation)\s+([A-Za-z_]\w*)`)
+
+// operationName returns the named operation in a GraphQL document, or "" if
+// none is present. The Xplora backend expects the operationName field to be
+// set in the request body, matching the pyxplora_api client behavior.
+func operationName(query string) string {
+	m := operationNameRe.FindStringSubmatch(query)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
 }
 
 // graphQLResponse is the raw JSON response wrapper.
@@ -107,7 +124,11 @@ func (e graphQLError) Error() string {
 // Returns the "data" field of the response as json.RawMessage.
 // Returns an error if the HTTP status is not 200 or if the response contains errors.
 func (c *Client) do(ctx context.Context, query string, variables map[string]any) (json.RawMessage, error) {
-	reqBody, err := json.Marshal(graphQLRequest{Query: query, Variables: variables})
+	reqBody, err := json.Marshal(graphQLRequest{
+		Query:         query,
+		Variables:     variables,
+		OperationName: operationName(query),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("xplora: marshal request: %w", err)
 	}
