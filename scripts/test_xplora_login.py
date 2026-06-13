@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""Standalone Xplora login probe — no dependencies beyond the stdlib.
+"""Xplora login probe — tests multiple password formats to find which one works.
 
-Run this ON THE SAME VPS as the bridge. It replicates the EXACT request the
-bridge now sends (MD5 password, Chrome User-Agent, H-* headers, operationName)
-so we can see whether the failure is in our code/environment or server-side.
-
-Your credentials are read from a prompt and never stored or printed.
+Run on any machine with Python 3 (no extra dependencies).
+Credentials are read interactively and never stored or echoed.
 
 Usage:
-    python3 test_xplora_login.py
-
-It will:
-  1. Try PHONE login (country code + phone + password).
-  2. Optionally try EMAIL login (to test the "Gmail" hypothesis).
+    python3 scripts/test_xplora_login.py
 """
 
 import getpass
@@ -44,13 +37,14 @@ SIGN_IN = (
 )
 
 
-def call(variables: dict) -> None:
+def call(label: str, variables: dict) -> bool:
+    pw_len = len(variables.get("password", ""))
+    safe = {k: (f"<{pw_len} chars>" if k == "password" else v) for k, v in variables.items()}
+    print(f"\n[{label}]")
+    print("  vars:", json.dumps(safe))
+
     body = json.dumps(
-        {
-            "query": SIGN_IN,
-            "variables": variables,
-            "operationName": "signInWithEmailOrPhone",
-        }
+        {"query": SIGN_IN, "variables": variables, "operationName": "signInWithEmailOrPhone"}
     ).encode()
 
     now = datetime.now(timezone.utc)
@@ -62,97 +56,86 @@ def call(variables: dict) -> None:
         "H-BackDoor-Authorization": f"Open {API_KEY}:{API_SECRET}",
     }
 
-    # Redacted echo of what we send (password hash and value hidden).
-    safe_vars = dict(variables)
-    if "password" in safe_vars:
-        safe_vars["password"] = "<md5:%d chars>" % len(safe_vars["password"])
-    print("  request variables:", json.dumps(safe_vars))
-
     req = urllib.request.Request(ENDPOINT, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            status = resp.status
             text = resp.read().decode()
     except urllib.error.HTTPError as e:
-        status = e.code
         text = e.read().decode()
-    except Exception as e:  # noqa: BLE001
-        print("  TRANSPORT ERROR:", e)
-        return
+    except Exception as exc:
+        print("  TRANSPORT ERROR:", exc)
+        return False
 
-    print("  HTTP", status)
-    print("  body:", text.strip())
     try:
         data = json.loads(text)
         errs = data.get("errors")
         if errs:
-            print("  >>> ERROR CODE:", errs[0].get("code"), "-", errs[0].get("message"))
-        elif data.get("data", {}).get("signInWithEmailOrPhone"):
-            print("  >>> SUCCESS: got a token!")
+            print(f"  FAIL  {errs[0].get('code')} — {errs[0].get('message')}")
+            return False
+        if data.get("data", {}).get("signInWithEmailOrPhone"):
+            print("  SUCCESS — got a token!")
+            return True
     except json.JSONDecodeError:
-        pass
+        print("  body:", text.strip())
+    return False
+
+
+def base_vars(cc: str, phone: str, pw: str) -> dict:
+    return {
+        "countryPhoneNumber": cc,
+        "phoneNumber": phone,
+        "password": pw,
+        "emailAddress": None,
+        "client": "APP",
+        "userLang": "en",
+        "timeZone": "UTC",
+    }
 
 
 def main() -> None:
     print("=== Xplora login probe ===\n")
     password = getpass.getpass("Password (hidden): ")
-    pw_md5 = hashlib.md5(password.encode()).hexdigest()
-
     cc = input("Country code (e.g. 47): ").strip()
     phone = input("Phone number (without country code): ").strip()
 
-    print("\n[1] PHONE + MD5 password:")
-    call(
-        {
-            "countryPhoneNumber": cc,
-            "phoneNumber": phone,
-            "password": pw_md5,
-            "emailAddress": None,
+    pw_md5    = hashlib.md5(password.encode()).hexdigest()
+    pw_sha256 = hashlib.sha256(password.encode()).hexdigest()
+    pw_sha1   = hashlib.sha1(password.encode()).hexdigest()  # noqa: S324
+
+    candidates = [
+        ("MD5-lower",  pw_md5),
+        ("MD5-upper",  pw_md5.upper()),
+        ("SHA-256",    pw_sha256),
+        ("SHA-1",      pw_sha1),
+        ("plaintext",  password),
+    ]
+
+    for label, pw in candidates:
+        if call(label, base_vars(cc, phone, pw)):
+            print(f"\n>>> Winner: {label}. Update the bridge to use this format.")
+            return
+
+    print("\nAll phone variants failed. Trying email…")
+    email = input("Email address linked to Xplora account: ").strip()
+    if not email:
+        print("Skipped.")
+        return
+
+    for label, pw in candidates:
+        ev = {
+            "countryPhoneNumber": None,
+            "phoneNumber": None,
+            "password": pw,
+            "emailAddress": email,
             "client": "APP",
             "userLang": "en",
             "timeZone": "UTC",
         }
-    )
+        if call(f"EMAIL+{label}", ev):
+            print(f"\n>>> Winner: EMAIL + {label}. Update bridge to use email login.")
+            return
 
-    print("\n[2] PHONE + PLAINTEXT password:")
-    call(
-        {
-            "countryPhoneNumber": cc,
-            "phoneNumber": phone,
-            "password": password,
-            "emailAddress": None,
-            "client": "APP",
-            "userLang": "en",
-            "timeZone": "UTC",
-        }
-    )
-
-    email = input("\nEmail address (blank to skip): ").strip()
-    if email:
-        print("\n[3] EMAIL + MD5 password:")
-        call(
-            {
-                "countryPhoneNumber": None,
-                "phoneNumber": None,
-                "password": pw_md5,
-                "emailAddress": email,
-                "client": "APP",
-                "userLang": "en",
-                "timeZone": "UTC",
-            }
-        )
-        print("\n[4] EMAIL + PLAINTEXT password:")
-        call(
-            {
-                "countryPhoneNumber": None,
-                "phoneNumber": None,
-                "password": password,
-                "emailAddress": email,
-                "client": "APP",
-                "userLang": "en",
-                "timeZone": "UTC",
-            }
-        )
+    print("\nAll variants failed. Either lockout is still active or a different auth flow is needed.")
 
 
 if __name__ == "__main__":
