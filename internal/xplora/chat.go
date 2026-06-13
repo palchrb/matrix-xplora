@@ -2,7 +2,6 @@ package xplora
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/json"
 	"fmt"
 )
@@ -10,11 +9,10 @@ import (
 // SignIn authenticates with phone+password and stores the resulting token.
 // This is the only method callable when auth.Token() is empty.
 func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string) (*AuthResponse, error) {
-	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
 		"countryPhoneNumber": countryCode,
 		"phoneNumber":        phone,
-		"password":           passwordMD5,
+		"password":           password,
 		"emailAddress":       nil,
 		"client":             "APP",
 		"userLang":           "en",
@@ -95,7 +93,6 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 	}
 	return &result.ReadMyInfo, nil
 }
-
 
 // GetChats fetches paginated chat messages for a given watch's child user ID.
 // msgID optionally filters to messages after a given message ID.
