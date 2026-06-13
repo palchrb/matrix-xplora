@@ -94,29 +94,42 @@ def call(variables: dict) -> None:
 
 
 def main() -> None:
-    print("=== Xplora login probe (run this on the VPS) ===\n")
+    print("=== Xplora login probe ===\n")
     password = getpass.getpass("Password (hidden): ")
     pw_md5 = hashlib.md5(password.encode()).hexdigest()
 
-    cc = input("Country code (e.g. 47), blank to skip phone test: ").strip()
-    if cc:
-        phone = input("Phone number (without country code): ").strip()
-        print("\n[1] PHONE login (MD5 password):")
-        call(
-            {
-                "countryPhoneNumber": cc,
-                "phoneNumber": phone,
-                "password": pw_md5,
-                "emailAddress": None,
-                "client": "APP",
-                "userLang": "en",
-                "timeZone": "UTC",
-            }
-        )
+    cc = input("Country code (e.g. 47): ").strip()
+    phone = input("Phone number (without country code): ").strip()
 
-    email = input("\nEmail address, blank to skip email test: ").strip()
+    print("\n[1] PHONE + MD5 password:")
+    call(
+        {
+            "countryPhoneNumber": cc,
+            "phoneNumber": phone,
+            "password": pw_md5,
+            "emailAddress": None,
+            "client": "APP",
+            "userLang": "en",
+            "timeZone": "UTC",
+        }
+    )
+
+    print("\n[2] PHONE + PLAINTEXT password:")
+    call(
+        {
+            "countryPhoneNumber": cc,
+            "phoneNumber": phone,
+            "password": password,
+            "emailAddress": None,
+            "client": "APP",
+            "userLang": "en",
+            "timeZone": "UTC",
+        }
+    )
+
+    email = input("\nEmail address (blank to skip): ").strip()
     if email:
-        print("\n[2] EMAIL login (MD5 password):")
+        print("\n[3] EMAIL + MD5 password:")
         call(
             {
                 "countryPhoneNumber": None,
@@ -128,14 +141,18 @@ def main() -> None:
                 "timeZone": "UTC",
             }
         )
-
-    print(
-        "\nInterpretation:\n"
-        "  - PHONE works here but bridge fails  -> bridge bug (unlikely now, requests match).\n"
-        "  - EMAIL works but PHONE fails        -> your account is email-keyed; add email login.\n"
-        "  - BOTH fail with E000004 here too    -> server-side: account lockout or IP block,\n"
-        "    NOT our code. Wait ~1h (lockout) or try from a non-datacenter network (IP block)."
-    )
+        print("\n[4] EMAIL + PLAINTEXT password:")
+        call(
+            {
+                "countryPhoneNumber": None,
+                "phoneNumber": None,
+                "password": password,
+                "emailAddress": email,
+                "client": "APP",
+                "userLang": "en",
+                "timeZone": "UTC",
+            }
+        )
 
 
 if __name__ == "__main__":
