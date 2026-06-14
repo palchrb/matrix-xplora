@@ -8,17 +8,19 @@ import (
 )
 
 // SignIn authenticates with phone+password and stores the resulting token.
+// clientID is the stable device UUID also used for FCM registration.
 // This is the only method callable when auth.Token() is empty.
-func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string) (*AuthResponse, error) {
+func (c *Client) SignIn(ctx context.Context, countryCode, phone, password, clientID string) (*AuthResponse, error) {
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
-		"countryPhoneNumber": countryCode,
+		"countryPhoneNumber": "+" + countryCode,
 		"phoneNumber":        phone,
 		"password":           passwordMD5,
 		"emailAddress":       nil,
 		"client":             "APP",
-		"userLang":           "en",
+		"userLang":           "en-US",
 		"timeZone":           "UTC",
+		"clientId":           clientID,
 	}
 	data, err := c.do(ctx, MutationSignIn, vars)
 	if err != nil {
@@ -98,27 +100,29 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 
 // GetChats fetches paginated chat messages for a given watch's child user ID.
 // msgID optionally filters to messages after a given message ID.
-func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, error) {
+// Returns the message list and the number of remaining messages for pagination.
+func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, int, error) {
 	vars := map[string]any{
 		"uid":    wuid,
 		"offset": offset,
 		"limit":  limit,
+		"isNew":  true,
 	}
 	if msgID != "" {
 		vars["msgId"] = msgID
 	}
 	data, err := c.do(ctx, QueryChats, vars)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var result struct {
 		ChatsNew ChatsResponse `json:"chatsNew"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("parsing chatsNew response: %w", err)
+		return nil, 0, fmt.Errorf("parsing chatsNew response: %w", err)
 	}
-	return result.ChatsNew.List, nil
+	return result.ChatsNew.List, result.ChatsNew.RemainingMsgs, nil
 }
 
 // SendChatText sends a text message to a watch.
@@ -224,6 +228,23 @@ func (c *Client) FetchChatVoice(ctx context.Context, wuid, msgID string) (string
 		return "", fmt.Errorf("parsing fetchChatVoice response: %w", err)
 	}
 	return result.FetchChatVoice, nil
+}
+
+// GetDeviceList returns all watches linked to the parent account.
+// This is the current API method for enumerating children/watches —
+// the app no longer relies on user.children from the signIn response.
+func (c *Client) GetDeviceList(ctx context.Context) ([]DeviceListItemFile, error) {
+	data, err := c.do(ctx, QueryDeviceList, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		DeviceList []DeviceListItemFile `json:"deviceList"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parsing deviceList response: %w", err)
+	}
+	return result.DeviceList, nil
 }
 
 // AskWatchLocate requests the watch to push a fresh GPS fix to the server.

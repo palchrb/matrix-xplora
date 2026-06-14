@@ -12,6 +12,7 @@ mutation signInWithEmailOrPhone(
   $client: ClientType!
   $userLang: String!
   $timeZone: String!
+  $clientId: String
 ) {
   signInWithEmailOrPhone(
     countryPhoneNumber: $countryPhoneNumber
@@ -21,6 +22,7 @@ mutation signInWithEmailOrPhone(
     client: $client
     userLang: $userLang
     timeZone: $timeZone
+    clientId: $clientId
   ) {
     id
     token
@@ -108,20 +110,23 @@ mutation SetReadChatMsg($uid: String!, $msgId: String, $id: String) {
 }`
 
 	// QueryChats fetches paginated messages for a watch.
-	// data is a JSON blob containing type-specific message content.
-	// create is the Unix timestamp (milliseconds).
-	// sender.id identifies who sent the message (child vs parent).
-	// $msgId optionally filters to messages after a given ID.
+	// $isNew filters to new/unread messages (always true in the official app).
+	// $msgId optionally filters to messages after a given message ID.
 	QueryChats = `
-query Chats($uid: String!, $offset: Int, $limit: Int, $msgId: String) {
-  chatsNew(uid: $uid, offset: $offset, limit: $limit, msgId: $msgId) {
+query Chats($uid: String!, $msgId: String, $offset: Int, $limit: Int, $isNew: Boolean) {
+  chatsNew(uid: $uid, msgId: $msgId, offset: $offset, limit: $limit, isNew: $isNew) {
     offset
     limit
+    remainingMsgs
     list {
       id
       msgId
+      readFlag
       type
       sender {
+        id
+      }
+      receiver {
         id
       }
       data
@@ -144,6 +149,32 @@ query ReadMyInfo {
         }
       }
     }
+  }
+}`
+
+	// QueryDeviceList fetches the list of linked watch devices.
+	// The app uses this instead of user.children from signIn.
+	// user.id is the child UID used for chat queries.
+	QueryDeviceList = `
+query deviceList {
+  deviceList {
+    id
+    name
+    phoneNumber
+    user {
+      id
+      name
+      file {
+        orig {
+          urlPathS3
+        }
+      }
+    }
+    location {
+      battery
+      isCharging
+    }
+    unreadChatMessageCount
   }
 }`
 

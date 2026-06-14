@@ -57,12 +57,12 @@ func (f *flexFloat64) UnmarshalJSON(data []byte) error {
 
 // AuthResponse is returned by the signInWithEmailOrPhone mutation.
 type AuthResponse struct {
-	ID           string        `json:"id"`
-	Token        string        `json:"token"`
-	RefreshToken string        `json:"refreshToken"`
-	ExpireDate   flexString    `json:"expireDate"`
-	User         *AuthUser     `json:"user"`
-	W360         *W360         `json:"w360"`
+	ID           string     `json:"id"`
+	Token        string     `json:"token"`
+	RefreshToken string     `json:"refreshToken"`
+	ExpireDate   flexString `json:"expireDate"`
+	User         *AuthUser  `json:"user"`
+	W360         *W360      `json:"w360"`
 }
 
 // AuthUser is the user object returned in the sign-in response.
@@ -146,36 +146,75 @@ type UserInfo struct {
 }
 
 // ChatMessage is a single message from the chatsNew query.
-// data is a JSON value with type-specific content (e.g. a string or object with a "text" field).
-// create is the server-side Unix timestamp in milliseconds.
-// sender.id identifies the sender; compare to the parent's user ID to set isFromMe.
+// data is a JSON blob with type-specific content.
+// sender.id and receiver.id identify participants; compare to parent's user ID for isFromMe.
+// readFlag: 1 = unread, 2 = read.
 type ChatMessage struct {
-	ID     string          `json:"id"`
-	MsgID  string          `json:"msgId"`
-	Type   *string         `json:"type"`
-	Sender *UserRef        `json:"sender"`
-	Data   json.RawMessage `json:"data"`
-	Create *int64          `json:"create"`
+	ID       string          `json:"id"`
+	MsgID    string          `json:"msgId"`
+	ReadFlag int             `json:"readFlag"`
+	Type     *string         `json:"type"`
+	Sender   *UserRef        `json:"sender"`
+	Receiver *UserRef        `json:"receiver"`
+	Data     json.RawMessage `json:"data"`
+	Create   *int64          `json:"create"`
 }
 
 // ChatsResponse wraps the paginated chatsNew response.
 type ChatsResponse struct {
-	Offset int           `json:"offset"`
-	Limit  int           `json:"limit"`
-	List   []ChatMessage `json:"list"`
+	Offset        int           `json:"offset"`
+	Limit         int           `json:"limit"`
+	RemainingMsgs int           `json:"remainingMsgs"`
+	List          []ChatMessage `json:"list"`
+}
+
+// DeviceLocation holds the minimal location fields we request in deviceList.
+type DeviceLocation struct {
+	Battery    int  `json:"battery"`
+	IsCharging bool `json:"isCharging"`
+}
+
+// FileInfo holds image URL info from the new API response format.
+type FileInfo struct {
+	URLPathS3 string `json:"urlPathS3"`
+}
+
+// FileOrig holds the orig sub-object of a file.
+type FileOrig struct {
+	Orig *FileInfo `json:"orig"`
+}
+
+// DeviceListItem represents a single watch in the deviceList response.
+type DeviceListItem struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	PhoneNumber string          `json:"phoneNumber"`
+	User        *UserRef        `json:"user"`
+	Location    *DeviceLocation `json:"location"`
+	UnreadCount int             `json:"unreadChatMessageCount"`
+}
+
+// DeviceListItemFile is DeviceListItem with file info for avatar resolution.
+type DeviceListItemFile struct {
+	DeviceListItem
+	User *struct {
+		ID   string    `json:"id"`
+		Name string    `json:"name"`
+		File *FileOrig `json:"file"`
+	} `json:"user"`
 }
 
 // LocationInfo is the response from the watchLastLocate query.
 // Tm is a Unix timestamp (seconds or milliseconds depending on API version).
 // Lat/Lng are decimal degrees. Battery is a percentage 0–100.
 type LocationInfo struct {
-	Tm         int64        `json:"tm"`
-	Lat        flexFloat64  `json:"lat"`
-	Lng        flexFloat64  `json:"lng"`
-	Addr       string  `json:"addr"`
-	Poi        string  `json:"poi"`
-	City       string  `json:"city"`
-	Battery    int     `json:"battery"`
-	IsCharging bool    `json:"isCharging"`
-	LocateType string  `json:"locateType"`
+	Tm         int64       `json:"tm"`
+	Lat        flexFloat64 `json:"lat"`
+	Lng        flexFloat64 `json:"lng"`
+	Addr       string      `json:"addr"`
+	Poi        string      `json:"poi"`
+	City       string      `json:"city"`
+	Battery    int         `json:"battery"`
+	IsCharging bool        `json:"isCharging"`
+	LocateType string      `json:"locateType"`
 }

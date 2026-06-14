@@ -1276,7 +1276,7 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		}
 	}
 
-	msgs, err := c.gql.GetChats(ctx, wuid, 0, 20, lastMsgID)
+	msgs, _, err := c.gql.GetChats(ctx, wuid, 0, 20, lastMsgID)
 	if err != nil {
 		c.handleAPIError(ctx, err)
 		c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")

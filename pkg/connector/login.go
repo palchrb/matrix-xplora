@@ -77,12 +77,16 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("creating session directory: %w", err)
 	}
 
+	// Load or generate a stable ClientID before sign-in — the API now requires
+	// it as part of the signInWithEmailOrPhone mutation.
+	clientID := loadOrCreateClientID(sessDir)
+
 	log := zerolog.Ctx(ctx)
 	auth := xplora.NewAuth(sessDir)
 	gqlClient := xplora.NewClient(auth)
 
 	log.Info().Str("country_code", countryCode).Str("phone", phone).Msg("Attempting Xplora sign-in")
-	authResp, err := gqlClient.SignIn(ctx, countryCode, phone, password)
+	authResp, err := gqlClient.SignIn(ctx, countryCode, phone, password, clientID)
 	if err != nil {
 		log.Error().Err(err).Str("country_code", countryCode).Str("phone", phone).Msg("Xplora sign-in failed")
 		return nil, fmt.Errorf("Xplora login failed: %w", err)
@@ -107,29 +111,28 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("saving Xplora credentials: %w", err)
 	}
 
-	// Build WatchInfo list from sign-in response children.
-	var children []xplora.WatchInfo
-	for _, c := range authResp.User.Children {
-		if c.Ward != nil && c.Ward.ID != "" {
-			name := c.Ward.Name
-			w := xplora.WatchInfo{
-				ID:   c.Ward.ID,
-				Name: &name,
-				User: c.Ward,
-			}
-			if c.Ward.File != nil && c.Ward.File.ID != "" {
-				w.AvatarURL = "https://api.myxplora.com/file?id=" + c.Ward.File.ID
-			}
-			children = append(children, w)
-		}
+	// Fetch the watch list via deviceList — the app uses this separate query
+	// rather than user.children from the signIn response.
+	devices, err := gqlClient.GetDeviceList(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("deviceList failed after sign-in; watch list will be empty")
 	}
-
-	// Load or generate a stable ClientID for FCM registration.
-	// The ClientID identifies the virtual Android device registered with Google.
-	// It must survive logout+login cycles: re-registering a new device on every
-	// login causes Google rate-limiting and makes Xplora route pushes to the
-	// old device until the association is refreshed.
-	clientID := loadOrCreateClientID(sessDir)
+	var children []xplora.WatchInfo
+	for _, d := range devices {
+		if d.User == nil || d.User.ID == "" {
+			continue
+		}
+		name := d.User.Name
+		w := xplora.WatchInfo{
+			ID:   d.ID,
+			Name: &name,
+			User: &xplora.UserRef{ID: d.User.ID, Name: d.User.Name},
+		}
+		if d.User.File != nil && d.User.File.Orig != nil && d.User.File.Orig.URLPathS3 != "" {
+			w.AvatarURL = d.User.File.Orig.URLPathS3
+		}
+		children = append(children, w)
+	}
 
 	meta := &UserLoginMetadata{
 		PhoneNumber: phone,
