@@ -1275,33 +1275,31 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		}
 	}
 
-	const pageSize = 100
+	// Fetch with a large limit so we get all missed messages in one request.
+	// We avoid offset-based pagination here because it's unclear whether the
+	// server applies offset relative to the msgId cursor or to the full history.
+	// 500 covers weeks of typical usage; remainingMsgs is logged as a warning
+	// so we can detect the rare case where even this limit is exceeded.
+	const catchUpLimit = 500
+	msgs, remaining, err := c.gql.GetChats(ctx, wuid, 0, catchUpLimit, lastMsgID)
+	if err != nil {
+		c.handleAPIError(ctx, err)
+		c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
+		return
+	}
+	if remaining > 0 {
+		c.log.Warn().Str("wuid", wuid).Int("remaining", remaining).Msg("Poll: catch-up limit exceeded, some messages may be missing")
+	}
+
 	var allNew []xplora.ChatMessage
 	var newest string
-	offset := 0
-
-	for {
-		msgs, remaining, err := c.gql.GetChats(ctx, wuid, offset, pageSize, lastMsgID)
-		if err != nil {
-			c.handleAPIError(ctx, err)
-			c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
-			return
-		}
-		if len(msgs) == 0 {
-			break
-		}
-		if offset == 0 {
-			newest = msgs[0].MsgID
-		}
+	if len(msgs) > 0 {
+		newest = msgs[0].MsgID
 		for _, msg := range msgs {
 			if lastMsgID == "" || msg.MsgID > lastMsgID {
 				allNew = append(allNew, msg)
 			}
 		}
-		if remaining == 0 {
-			break
-		}
-		offset += len(msgs)
 	}
 
 	if len(allNew) == 0 {
