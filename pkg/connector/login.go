@@ -77,12 +77,16 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("creating session directory: %w", err)
 	}
 
+	// Load or generate a stable ClientID before sign-in — the API now requires
+	// it as part of the signInWithEmailOrPhone mutation.
+	clientID := loadOrCreateClientID(sessDir)
+
 	log := zerolog.Ctx(ctx)
 	auth := xplora.NewAuth(sessDir)
 	gqlClient := xplora.NewClient(auth)
 
 	log.Info().Str("country_code", countryCode).Str("phone", phone).Msg("Attempting Xplora sign-in")
-	authResp, err := gqlClient.SignIn(ctx, countryCode, phone, password)
+	authResp, err := gqlClient.SignIn(ctx, countryCode, phone, password, clientID)
 	if err != nil {
 		log.Error().Err(err).Str("country_code", countryCode).Str("phone", phone).Msg("Xplora sign-in failed")
 		return nil, fmt.Errorf("Xplora login failed: %w", err)
@@ -123,13 +127,6 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 			children = append(children, w)
 		}
 	}
-
-	// Load or generate a stable ClientID for FCM registration.
-	// The ClientID identifies the virtual Android device registered with Google.
-	// It must survive logout+login cycles: re-registering a new device on every
-	// login causes Google rate-limiting and makes Xplora route pushes to the
-	// old device until the association is refreshed.
-	clientID := loadOrCreateClientID(sessDir)
 
 	meta := &UserLoginMetadata{
 		PhoneNumber: phone,

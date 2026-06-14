@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	graphQLEndpoint = "https://api.myxplora.com/api"
-	apiKey          = "fc45d50304511edbf67a12b93c413b6a"
-	apiSecret       = "1e9b6fe0327711ed959359c157878dcb"
+	graphQLEndpoint = "https://api.prod.myxplora.com/api/"
+	apiKey          = "98fa41bc50c84e2f833e3997aedfe1cf"
+	apiSecret       = "6d129c656ef64bf0becd3a370bbe068d"
 )
 
 // Client is a GraphQL client for the Xplora API.
@@ -84,6 +84,7 @@ type graphQLRequest struct {
 	Query         string         `json:"query"`
 	Variables     map[string]any `json:"variables,omitempty"`
 	OperationName string         `json:"operationName,omitempty"`
+	Extensions    map[string]any `json:"extensions,omitempty"`
 }
 
 // operationNameRe extracts the operation name from a GraphQL document, e.g.
@@ -128,6 +129,12 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 		Query:         query,
 		Variables:     variables,
 		OperationName: operationName(query),
+		Extensions: map[string]any{
+			"clientLibrary": map[string]any{
+				"name":    "apollo-kotlin",
+				"version": "4.4.3",
+			},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("xplora: marshal request: %w", err)
@@ -139,8 +146,10 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 	}
 
 	now := time.Now().UTC()
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.3")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "multipart/mixed;deferSpec=20220824, application/graphql-response+json, application/json")
+	req.Header.Set("Accept-Language", "en-US")
+	req.Header.Set("User-Agent", "okhttp/5.3.2")
 	req.Header.Set("H-Date", now.Format(http.TimeFormat))
 	req.Header.Set("H-Tid", strconv.FormatInt(now.Unix(), 10))
 	req.Header.Set("H-BackDoor-Authorization", c.backdoorAuth())

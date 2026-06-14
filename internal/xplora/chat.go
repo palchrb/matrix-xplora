@@ -8,17 +8,19 @@ import (
 )
 
 // SignIn authenticates with phone+password and stores the resulting token.
+// clientID is the stable device UUID also used for FCM registration.
 // This is the only method callable when auth.Token() is empty.
-func (c *Client) SignIn(ctx context.Context, countryCode, phone, password string) (*AuthResponse, error) {
+func (c *Client) SignIn(ctx context.Context, countryCode, phone, password, clientID string) (*AuthResponse, error) {
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
-		"countryPhoneNumber": countryCode,
+		"countryPhoneNumber": "+" + countryCode,
 		"phoneNumber":        phone,
 		"password":           passwordMD5,
 		"emailAddress":       nil,
 		"client":             "APP",
-		"userLang":           "en",
+		"userLang":           "en-US",
 		"timeZone":           "UTC",
+		"clientId":           clientID,
 	}
 	data, err := c.do(ctx, MutationSignIn, vars)
 	if err != nil {

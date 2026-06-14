@@ -12,6 +12,7 @@ mutation signInWithEmailOrPhone(
   $client: ClientType!
   $userLang: String!
   $timeZone: String!
+  $clientId: String
 ) {
   signInWithEmailOrPhone(
     countryPhoneNumber: $countryPhoneNumber
@@ -21,6 +22,7 @@ mutation signInWithEmailOrPhone(
     client: $client
     userLang: $userLang
     timeZone: $timeZone
+    clientId: $clientId
   ) {
     id
     token
