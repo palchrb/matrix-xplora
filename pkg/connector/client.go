@@ -1257,10 +1257,16 @@ func (c *XploraClient) pollAllWatches(ctx context.Context) {
 	}
 }
 
-// pollWatch fetches all messages since the stored cursor for a single watch
-// and dispatches new ones. Uses remainingMsgs to paginate until caught up.
-// On the first call (LastMsgID == ""), only initialises the cursor to the
-// newest message without dispatching history, preventing a flood on first connect.
+// pollWatch fetches messages for a single watch and dispatches new ones.
+//
+// First connect (lastMsgID == ""): fetches one page to initialise the cursor,
+// but does NOT dispatch history — avoids flooding Matrix on first login.
+//
+// Subsequent connects (lastMsgID set): paginates with msgId cursor until
+// remainingMsgs==0 to catch up on everything missed while offline. isNew is
+// omitted so the server returns all messages since the cursor, not just unread
+// ones (messages read on the phone while the bridge was down would otherwise
+// be silently skipped).
 func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 	portalKey := networkid.PortalKey{
 		ID:       portalIDFromWUID(wuid),
@@ -1275,15 +1281,32 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		}
 	}
 
-	// Paginate using the same limit=100 the official app uses.
-	// msg.MsgID > lastMsgID is a secondary guard against duplicates in case
-	// the server applies offset relative to the full history rather than the
-	// filtered window — in that case we just skip old messages cheaply.
+	// First connect: just set the cursor, don't dispatch old history.
+	if lastMsgID == "" {
+		msgs, _, err := c.gql.GetChats(ctx, wuid, 0, 100, "")
+		if err != nil {
+			c.handleAPIError(ctx, err)
+			c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to initialise cursor")
+			return
+		}
+		if len(msgs) > 0 && portal != nil {
+			if meta, ok := portal.Metadata.(*PortalMetadata); ok && msgs[0].MsgID > meta.LastMsgID {
+				meta.LastMsgID = msgs[0].MsgID
+				portal.Save(ctx)
+			}
+		}
+		return
+	}
+
+	// Catch-up: paginate with msgId cursor to fetch everything since last seen.
+	// isNew is not sent so read-on-phone messages are included.
+	// msg.MsgID > lastMsgID guards against duplicates if the server applies
+	// offset relative to the full history rather than the filtered window.
 	const pageSize = 100
 	var allNew []xplora.ChatMessage
-	var newest string
+	newest := lastMsgID
 	for offset := 0; ; offset += pageSize {
-		msgs, remaining, err := c.gql.GetChats(ctx, wuid, offset, pageSize, lastMsgID)
+		msgs, remaining, err := c.gql.GetCatchUpChats(ctx, wuid, offset, pageSize, lastMsgID)
 		if err != nil {
 			c.handleAPIError(ctx, err)
 			c.log.Warn().Err(err).Str("wuid", wuid).Msg("Poll: failed to get chats")
@@ -1292,11 +1315,11 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 		if len(msgs) == 0 {
 			break
 		}
-		if offset == 0 {
+		if msgs[0].MsgID > newest {
 			newest = msgs[0].MsgID
 		}
 		for _, msg := range msgs {
-			if lastMsgID == "" || msg.MsgID > lastMsgID {
+			if msg.MsgID > lastMsgID {
 				allNew = append(allNew, msg)
 			}
 		}
@@ -1306,12 +1329,6 @@ func (c *XploraClient) pollWatch(ctx context.Context, wuid string) {
 	}
 
 	if len(allNew) == 0 {
-		if lastMsgID == "" && newest != "" && portal != nil {
-			if meta, ok := portal.Metadata.(*PortalMetadata); ok && newest > meta.LastMsgID {
-				meta.LastMsgID = newest
-				portal.Save(ctx)
-			}
-		}
 		return
 	}
 

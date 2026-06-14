@@ -125,6 +125,32 @@ func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, m
 	return result.ChatsNew.List, result.ChatsNew.RemainingMsgs, nil
 }
 
+// GetCatchUpChats is like GetChats but does not send isNew=true, so the server
+// returns all messages since the cursor including ones already read on the phone.
+// Used during catch-up polling to avoid missing messages read while offline.
+func (c *Client) GetCatchUpChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, int, error) {
+	vars := map[string]any{
+		"uid":    wuid,
+		"offset": offset,
+		"limit":  limit,
+	}
+	if msgID != "" {
+		vars["msgId"] = msgID
+	}
+	data, err := c.do(ctx, QueryChats, vars)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var result struct {
+		ChatsNew ChatsResponse `json:"chatsNew"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, 0, fmt.Errorf("parsing chatsNew response: %w", err)
+	}
+	return result.ChatsNew.List, result.ChatsNew.RemainingMsgs, nil
+}
+
 // SendChatText sends a text message to a watch.
 func (c *Client) SendChatText(ctx context.Context, wuid, text string) error {
 	vars := map[string]any{
