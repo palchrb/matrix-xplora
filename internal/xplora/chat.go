@@ -228,6 +228,23 @@ func (c *Client) FetchChatVoice(ctx context.Context, wuid, msgID string) (string
 	return result.FetchChatVoice, nil
 }
 
+// GetDeviceList returns all watches linked to the parent account.
+// This is the current API method for enumerating children/watches —
+// the app no longer relies on user.children from the signIn response.
+func (c *Client) GetDeviceList(ctx context.Context) ([]DeviceListItemFile, error) {
+	data, err := c.do(ctx, QueryDeviceList, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		DeviceList []DeviceListItemFile `json:"deviceList"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parsing deviceList response: %w", err)
+	}
+	return result.DeviceList, nil
+}
+
 // AskWatchLocate requests the watch to push a fresh GPS fix to the server.
 // Returns an error if the API call fails, but the watch's response is asynchronous.
 func (c *Client) AskWatchLocate(ctx context.Context, wuid string) error {

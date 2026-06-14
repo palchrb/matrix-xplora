@@ -149,6 +149,32 @@ query ReadMyInfo {
   }
 }`
 
+	// QueryDeviceList fetches the list of linked watch devices.
+	// The app uses this instead of user.children from signIn.
+	// user.id is the child UID used for chat queries.
+	QueryDeviceList = `
+query deviceList {
+  deviceList {
+    id
+    name
+    phoneNumber
+    user {
+      id
+      name
+      file {
+        orig {
+          urlPathS3
+        }
+      }
+    }
+    location {
+      battery
+      isCharging
+    }
+    unreadChatMessageCount
+  }
+}`
+
 	// QueryFetchChatImage fetches the download URL for an image message attachment.
 	QueryFetchChatImage = `
 query FetchChatImage($uid: String!, $msgId: String!) {

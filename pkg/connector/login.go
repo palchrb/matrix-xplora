@@ -111,21 +111,27 @@ func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("saving Xplora credentials: %w", err)
 	}
 
-	// Build WatchInfo list from sign-in response children.
+	// Fetch the watch list via deviceList — the app uses this separate query
+	// rather than user.children from the signIn response.
+	devices, err := gqlClient.GetDeviceList(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("deviceList failed after sign-in; watch list will be empty")
+	}
 	var children []xplora.WatchInfo
-	for _, c := range authResp.User.Children {
-		if c.Ward != nil && c.Ward.ID != "" {
-			name := c.Ward.Name
-			w := xplora.WatchInfo{
-				ID:   c.Ward.ID,
-				Name: &name,
-				User: c.Ward,
-			}
-			if c.Ward.File != nil && c.Ward.File.ID != "" {
-				w.AvatarURL = "https://api.myxplora.com/file?id=" + c.Ward.File.ID
-			}
-			children = append(children, w)
+	for _, d := range devices {
+		if d.User == nil || d.User.ID == "" {
+			continue
 		}
+		name := d.User.Name
+		w := xplora.WatchInfo{
+			ID:   d.ID,
+			Name: &name,
+			User: &xplora.UserRef{ID: d.User.ID, Name: d.User.Name},
+		}
+		if d.User.File != nil && d.User.File.Orig != nil && d.User.File.Orig.URLPathS3 != "" {
+			w.AvatarURL = d.User.File.Orig.URLPathS3
+		}
+		children = append(children, w)
 	}
 
 	meta := &UserLoginMetadata{

@@ -57,12 +57,12 @@ func (f *flexFloat64) UnmarshalJSON(data []byte) error {
 
 // AuthResponse is returned by the signInWithEmailOrPhone mutation.
 type AuthResponse struct {
-	ID           string        `json:"id"`
-	Token        string        `json:"token"`
-	RefreshToken string        `json:"refreshToken"`
-	ExpireDate   flexString    `json:"expireDate"`
-	User         *AuthUser     `json:"user"`
-	W360         *W360         `json:"w360"`
+	ID           string     `json:"id"`
+	Token        string     `json:"token"`
+	RefreshToken string     `json:"refreshToken"`
+	ExpireDate   flexString `json:"expireDate"`
+	User         *AuthUser  `json:"user"`
+	W360         *W360      `json:"w360"`
 }
 
 // AuthUser is the user object returned in the sign-in response.
@@ -165,17 +165,53 @@ type ChatsResponse struct {
 	List   []ChatMessage `json:"list"`
 }
 
+// DeviceLocation holds the minimal location fields we request in deviceList.
+type DeviceLocation struct {
+	Battery    int  `json:"battery"`
+	IsCharging bool `json:"isCharging"`
+}
+
+// FileInfo holds image URL info from the new API response format.
+type FileInfo struct {
+	URLPathS3 string `json:"urlPathS3"`
+}
+
+// FileOrig holds the orig sub-object of a file.
+type FileOrig struct {
+	Orig *FileInfo `json:"orig"`
+}
+
+// DeviceListItem represents a single watch in the deviceList response.
+type DeviceListItem struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	PhoneNumber string          `json:"phoneNumber"`
+	User        *UserRef        `json:"user"`
+	Location    *DeviceLocation `json:"location"`
+	UnreadCount int             `json:"unreadChatMessageCount"`
+}
+
+// DeviceListItemFile is DeviceListItem with file info for avatar resolution.
+type DeviceListItemFile struct {
+	DeviceListItem
+	User *struct {
+		ID   string    `json:"id"`
+		Name string    `json:"name"`
+		File *FileOrig `json:"file"`
+	} `json:"user"`
+}
+
 // LocationInfo is the response from the watchLastLocate query.
 // Tm is a Unix timestamp (seconds or milliseconds depending on API version).
 // Lat/Lng are decimal degrees. Battery is a percentage 0–100.
 type LocationInfo struct {
-	Tm         int64        `json:"tm"`
-	Lat        flexFloat64  `json:"lat"`
-	Lng        flexFloat64  `json:"lng"`
-	Addr       string  `json:"addr"`
-	Poi        string  `json:"poi"`
-	City       string  `json:"city"`
-	Battery    int     `json:"battery"`
-	IsCharging bool    `json:"isCharging"`
-	LocateType string  `json:"locateType"`
+	Tm         int64       `json:"tm"`
+	Lat        flexFloat64 `json:"lat"`
+	Lng        flexFloat64 `json:"lng"`
+	Addr       string      `json:"addr"`
+	Poi        string      `json:"poi"`
+	City       string      `json:"city"`
+	Battery    int         `json:"battery"`
+	IsCharging bool        `json:"isCharging"`
+	LocateType string      `json:"locateType"`
 }
