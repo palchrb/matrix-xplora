@@ -110,20 +110,23 @@ mutation SetReadChatMsg($uid: String!, $msgId: String, $id: String) {
 }`
 
 	// QueryChats fetches paginated messages for a watch.
-	// data is a JSON blob containing type-specific message content.
-	// create is the Unix timestamp (milliseconds).
-	// sender.id identifies who sent the message (child vs parent).
-	// $msgId optionally filters to messages after a given ID.
+	// $isNew filters to new/unread messages (always true in the official app).
+	// $msgId optionally filters to messages after a given message ID.
 	QueryChats = `
-query Chats($uid: String!, $offset: Int, $limit: Int, $msgId: String) {
-  chatsNew(uid: $uid, offset: $offset, limit: $limit, msgId: $msgId) {
+query Chats($uid: String!, $msgId: String, $offset: Int, $limit: Int, $isNew: Boolean) {
+  chatsNew(uid: $uid, msgId: $msgId, offset: $offset, limit: $limit, isNew: $isNew) {
     offset
     limit
+    remainingMsgs
     list {
       id
       msgId
+      readFlag
       type
       sender {
+        id
+      }
+      receiver {
         id
       }
       data

@@ -100,27 +100,29 @@ func (c *Client) GetMyInfo(ctx context.Context) (*UserInfo, error) {
 
 // GetChats fetches paginated chat messages for a given watch's child user ID.
 // msgID optionally filters to messages after a given message ID.
-func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, error) {
+// Returns the message list and the number of remaining messages for pagination.
+func (c *Client) GetChats(ctx context.Context, wuid string, offset, limit int, msgID string) ([]ChatMessage, int, error) {
 	vars := map[string]any{
 		"uid":    wuid,
 		"offset": offset,
 		"limit":  limit,
+		"isNew":  true,
 	}
 	if msgID != "" {
 		vars["msgId"] = msgID
 	}
 	data, err := c.do(ctx, QueryChats, vars)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var result struct {
 		ChatsNew ChatsResponse `json:"chatsNew"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("parsing chatsNew response: %w", err)
+		return nil, 0, fmt.Errorf("parsing chatsNew response: %w", err)
 	}
-	return result.ChatsNew.List, nil
+	return result.ChatsNew.List, result.ChatsNew.RemainingMsgs, nil
 }
 
 // SendChatText sends a text message to a watch.
