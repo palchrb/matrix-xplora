@@ -33,15 +33,14 @@ var _ bridgev2.LoginProcessUserInput = (*XploraLogin)(nil)
 // Start returns step 1: a single field for phone number or email address.
 func (xl *XploraLogin) Start(_ context.Context) (*bridgev2.LoginStep, error) {
 	return &bridgev2.LoginStep{
-		Type:         bridgev2.LoginStepTypeUserInput,
-		StepID:       "com.xplora.identifier",
-		Instructions: "Enter the phone number or email address of your Xplora parent account.",
+		Type:   bridgev2.LoginStepTypeUserInput,
+		StepID: "com.xplora.identifier",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
 					Type: bridgev2.LoginInputFieldTypeUsername,
 					ID:   "identifier",
-					Name: "Phone number (without country code) or email address",
+					Name: "Xplora parent account phone number (without country code) or email address",
 				},
 			},
 		},
@@ -69,15 +68,14 @@ func (xl *XploraLogin) submitStep1(_ context.Context, input map[string]string) (
 
 	if xl.isEmail {
 		return &bridgev2.LoginStep{
-			Type:         bridgev2.LoginStepTypeUserInput,
-			StepID:       "com.xplora.credentials_email",
-			Instructions: fmt.Sprintf("Enter the password for %s.", id),
+			Type:   bridgev2.LoginStepTypeUserInput,
+			StepID: "com.xplora.credentials_email",
 			UserInputParams: &bridgev2.LoginUserInputParams{
 				Fields: []bridgev2.LoginInputDataField{
 					{
 						Type: bridgev2.LoginInputFieldTypePassword,
 						ID:   "password",
-						Name: "Password",
+						Name: "Xplora password",
 					},
 				},
 			},
@@ -85,21 +83,20 @@ func (xl *XploraLogin) submitStep1(_ context.Context, input map[string]string) (
 	}
 
 	return &bridgev2.LoginStep{
-		Type:         bridgev2.LoginStepTypeUserInput,
-		StepID:       "com.xplora.credentials_phone",
-		Instructions: fmt.Sprintf("Enter the country code and password for %s.", id),
+		Type:   bridgev2.LoginStepTypeUserInput,
+		StepID: "com.xplora.credentials_phone",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
 					Type:    bridgev2.LoginInputFieldTypeUsername,
 					ID:      "country_code",
-					Name:    "Country code (digits only, e.g. 47 for Norway)",
+					Name:    "country code (digits only, e.g. 47 for Norway)",
 					Pattern: `^\d{1,4}$`,
 				},
 				{
 					Type: bridgev2.LoginInputFieldTypePassword,
 					ID:   "password",
-					Name: "Password",
+					Name: "Xplora password",
 				},
 			},
 		},
