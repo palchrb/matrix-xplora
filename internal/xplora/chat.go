@@ -7,20 +7,24 @@ import (
 	"fmt"
 )
 
-// SignIn authenticates with phone+password and stores the resulting token.
+// SignIn authenticates with either phone+password or email+password.
+// Pass a non-empty email to use the email flow; otherwise countryCode+phone are used.
 // clientID is the stable device UUID also used for FCM registration.
 // This is the only method callable when auth.Token() is empty.
-func (c *Client) SignIn(ctx context.Context, countryCode, phone, password, clientID string) (*AuthResponse, error) {
+func (c *Client) SignIn(ctx context.Context, countryCode, phone, email, password, clientID string) (*AuthResponse, error) {
 	passwordMD5 := fmt.Sprintf("%x", md5.Sum([]byte(password)))
 	vars := map[string]any{
-		"countryPhoneNumber": "+" + countryCode,
-		"phoneNumber":        phone,
-		"password":           passwordMD5,
-		"emailAddress":       nil,
-		"client":             "APP",
-		"userLang":           "en-US",
-		"timeZone":           "UTC",
-		"clientId":           clientID,
+		"password": passwordMD5,
+		"client":   "APP",
+		"userLang": "en-US",
+		"timeZone": "UTC",
+		"clientId": clientID,
+	}
+	if email != "" {
+		vars["emailAddress"] = email
+	} else {
+		vars["countryPhoneNumber"] = "+" + countryCode
+		vars["phoneNumber"] = phone
 	}
 	data, err := c.do(ctx, MutationSignIn, vars)
 	if err != nil {

@@ -118,18 +118,27 @@ func (xc *XploraConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Us
 }
 
 func (xc *XploraConnector) GetLoginFlows() []bridgev2.LoginFlow {
-	return []bridgev2.LoginFlow{{
-		Name:        "Password",
-		Description: "Log in with your Xplora parent account phone number and password",
-		ID:          "password",
-	}}
+	return []bridgev2.LoginFlow{
+		{
+			Name:        "Phone + Password",
+			Description: "Log in with your Xplora parent account phone number and password",
+			ID:          "phone",
+		},
+		{
+			Name:        "Email + Password",
+			Description: "Log in with your Xplora parent account email address and password",
+			ID:          "email",
+		},
+	}
 }
 
 func (xc *XploraConnector) CreateLogin(_ context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	if flowID != "password" {
+	switch flowID {
+	case "phone", "email":
+		return &XploraLogin{connector: xc, user: user, flowID: flowID}, nil
+	default:
 		return nil, fmt.Errorf("unknown login flow ID: %q", flowID)
 	}
-	return &XploraLogin{connector: xc, user: user}, nil
 }
 
 // --- DB metadata types ---
@@ -138,6 +147,7 @@ func (xc *XploraConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 type UserLoginMetadata struct {
 	PhoneNumber string `json:"phoneNumber"`
 	CountryCode string `json:"countryCode"`
+	Email       string `json:"email,omitempty"`
 	UserID      string `json:"userId"`
 	// ClientID is a UUID generated once at first login and reused for FCM registration.
 	ClientID string `json:"clientId"`
@@ -170,4 +180,9 @@ func ghostIDFromWUID(wuid string) networkid.UserID {
 // loginIDFromPhone uses E.164 format as the login ID.
 func loginIDFromPhone(countryCode, phone string) networkid.UserLoginID {
 	return networkid.UserLoginID("+" + countryCode + phone)
+}
+
+// loginIDFromEmail uses "email:<address>" as the login ID.
+func loginIDFromEmail(email string) networkid.UserLoginID {
+	return networkid.UserLoginID("email:" + email)
 }
