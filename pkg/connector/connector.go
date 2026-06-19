@@ -120,7 +120,7 @@ func (xc *XploraConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Us
 func (xc *XploraConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{
 		Name:        "Password",
-		Description: "Log in with your Xplora parent account phone number and password",
+		Description: "Log in with your Xplora parent account (phone number or email) and password",
 		ID:          "password",
 	}}
 }
@@ -138,6 +138,7 @@ func (xc *XploraConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 type UserLoginMetadata struct {
 	PhoneNumber string `json:"phoneNumber"`
 	CountryCode string `json:"countryCode"`
+	Email       string `json:"email,omitempty"`
 	UserID      string `json:"userId"`
 	// ClientID is a UUID generated once at first login and reused for FCM registration.
 	ClientID string `json:"clientId"`
@@ -170,4 +171,9 @@ func ghostIDFromWUID(wuid string) networkid.UserID {
 // loginIDFromPhone uses E.164 format as the login ID.
 func loginIDFromPhone(countryCode, phone string) networkid.UserLoginID {
 	return networkid.UserLoginID("+" + countryCode + phone)
+}
+
+// loginIDFromEmail uses "email:<address>" as the login ID.
+func loginIDFromEmail(email string) networkid.UserLoginID {
+	return networkid.UserLoginID("email:" + email)
 }
