@@ -118,27 +118,18 @@ func (xc *XploraConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Us
 }
 
 func (xc *XploraConnector) GetLoginFlows() []bridgev2.LoginFlow {
-	return []bridgev2.LoginFlow{
-		{
-			Name:        "Phone + Password",
-			Description: "Log in with your Xplora parent account phone number and password",
-			ID:          "phone",
-		},
-		{
-			Name:        "Email + Password",
-			Description: "Log in with your Xplora parent account email address and password",
-			ID:          "email",
-		},
-	}
+	return []bridgev2.LoginFlow{{
+		Name:        "Password",
+		Description: "Log in with your Xplora parent account (phone number or email) and password",
+		ID:          "password",
+	}}
 }
 
 func (xc *XploraConnector) CreateLogin(_ context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	switch flowID {
-	case "phone", "email":
-		return &XploraLogin{connector: xc, user: user, flowID: flowID}, nil
-	default:
+	if flowID != "password" {
 		return nil, fmt.Errorf("unknown login flow ID: %q", flowID)
 	}
+	return &XploraLogin{connector: xc, user: user}, nil
 }
 
 // --- DB metadata types ---

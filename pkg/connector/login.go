@@ -15,57 +15,40 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
-// XploraLogin implements both login flows (phone and email).
-// flowID is "phone" or "email", set by CreateLogin.
+// XploraLogin implements the single-step password login flow.
+// Accepts either phone+country_code or email; SubmitUserInput detects which was given.
 type XploraLogin struct {
 	connector *XploraConnector
 	user      *bridgev2.User
-	flowID    string
 }
 
 var _ bridgev2.LoginProcessUserInput = (*XploraLogin)(nil)
 
-// Start returns the credential input step appropriate for the selected flow.
+// Start returns the credential input step. The user fills in either
+// (country_code + phone) or email — whichever they have.
 func (xl *XploraLogin) Start(_ context.Context) (*bridgev2.LoginStep, error) {
-	if xl.flowID == "email" {
-		return &bridgev2.LoginStep{
-			Type:         bridgev2.LoginStepTypeUserInput,
-			StepID:       "com.xplora.enter_credentials_email",
-			Instructions: "Enter your Xplora parent account email address and password.",
-			UserInputParams: &bridgev2.LoginUserInputParams{
-				Fields: []bridgev2.LoginInputDataField{
-					{
-						Type: bridgev2.LoginInputFieldTypeUsername,
-						ID:   "email",
-						Name: "Email address",
-					},
-					{
-						Type: bridgev2.LoginInputFieldTypePassword,
-						ID:   "password",
-						Name: "Password",
-					},
-				},
-			},
-		}, nil
-	}
-
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
-		StepID:       "com.xplora.enter_credentials_phone",
-		Instructions: "Enter your Xplora parent account phone number and password.",
+		StepID:       "com.xplora.enter_credentials",
+		Instructions: "Enter your Xplora parent account credentials.\nUse either phone number OR email — leave the other fields blank.",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
 					Type:    bridgev2.LoginInputFieldTypeUsername,
 					ID:      "country_code",
-					Name:    "Country code (digits only, e.g. 47 for Norway)",
+					Name:    "Country code (digits only, e.g. 47 for Norway) — phone login only",
 					Pattern: `^\d{1,4}$`,
 				},
 				{
 					Type:    bridgev2.LoginInputFieldTypeUsername,
 					ID:      "phone",
-					Name:    "Phone number (without country code)",
+					Name:    "Phone number (without country code) — phone login only",
 					Pattern: `^\d{5,15}$`,
+				},
+				{
+					Type: bridgev2.LoginInputFieldTypeUsername,
+					ID:   "email",
+					Name: "Email address — email login only",
 				},
 				{
 					Type: bridgev2.LoginInputFieldTypePassword,
@@ -77,63 +60,44 @@ func (xl *XploraLogin) Start(_ context.Context) (*bridgev2.LoginStep, error) {
 	}, nil
 }
 
-// SubmitUserInput handles credential submission for whichever flow was selected.
+// SubmitUserInput handles credential submission.
+// If email is non-empty, the email flow is used; otherwise phone+country_code.
 func (xl *XploraLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	password := input["password"]
 	if password == "" {
 		return nil, fmt.Errorf("password is required")
 	}
 
-	if xl.flowID == "email" {
-		return xl.submitEmail(ctx, input["email"], password)
-	}
-	return xl.submitPhone(ctx, input["country_code"], input["phone"], password)
-}
+	email := strings.TrimSpace(input["email"])
+	countryCode := strings.TrimSpace(input["country_code"])
+	phone := strings.TrimSpace(input["phone"])
 
-func (xl *XploraLogin) submitPhone(ctx context.Context, countryCode, phone, password string) (*bridgev2.LoginStep, error) {
+	if email != "" {
+		// Email flow
+		return xl.finishLogin(ctx, loginIDFromEmail(email), email, &UserLoginMetadata{Email: email},
+			func(gqlClient *xplora.Client, clientID string) (*xplora.AuthResponse, error) {
+				zerolog.Ctx(ctx).Info().Str("email", email).Msg("Attempting Xplora sign-in (email)")
+				return gqlClient.SignIn(ctx, "", "", email, password, clientID)
+			})
+	}
+
+	// Phone flow
 	if countryCode == "" {
-		return nil, fmt.Errorf("country code is required")
+		return nil, fmt.Errorf("country code is required when logging in with a phone number")
 	}
 	if phone == "" {
-		return nil, fmt.Errorf("phone number is required")
+		return nil, fmt.Errorf("phone number is required when logging in with a phone number")
 	}
-
-	loginID := loginIDFromPhone(countryCode, phone)
-	remoteName := "+" + countryCode + phone
-
-	meta := &UserLoginMetadata{
-		PhoneNumber: phone,
-		CountryCode: countryCode,
-	}
-
-	return xl.finishLogin(ctx, loginID, remoteName, meta, func(gqlClient *xplora.Client, clientID string) (*xplora.AuthResponse, error) {
-		log := zerolog.Ctx(ctx)
-		log.Info().Str("country_code", countryCode).Str("phone", phone).Msg("Attempting Xplora sign-in (phone)")
-		return gqlClient.SignIn(ctx, countryCode, phone, "", password, clientID)
-	})
+	return xl.finishLogin(ctx, loginIDFromPhone(countryCode, phone), "+"+countryCode+phone,
+		&UserLoginMetadata{PhoneNumber: phone, CountryCode: countryCode},
+		func(gqlClient *xplora.Client, clientID string) (*xplora.AuthResponse, error) {
+			zerolog.Ctx(ctx).Info().Str("country_code", countryCode).Str("phone", phone).Msg("Attempting Xplora sign-in (phone)")
+			return gqlClient.SignIn(ctx, countryCode, phone, "", password, clientID)
+		})
 }
 
-func (xl *XploraLogin) submitEmail(ctx context.Context, email, password string) (*bridgev2.LoginStep, error) {
-	if email == "" {
-		return nil, fmt.Errorf("email address is required")
-	}
-
-	loginID := loginIDFromEmail(email)
-	remoteName := email
-
-	meta := &UserLoginMetadata{
-		Email: email,
-	}
-
-	return xl.finishLogin(ctx, loginID, remoteName, meta, func(gqlClient *xplora.Client, clientID string) (*xplora.AuthResponse, error) {
-		log := zerolog.Ctx(ctx)
-		log.Info().Str("email", email).Msg("Attempting Xplora sign-in (email)")
-		return gqlClient.SignIn(ctx, "", "", email, password, clientID)
-	})
-}
-
-// finishLogin is the shared tail of both login paths: create session dir, sign in,
-// save credentials, fetch device list, persist login, start connection.
+// finishLogin is the shared tail: create session dir, sign in, save credentials,
+// fetch device list, persist login, start connection.
 func (xl *XploraLogin) finishLogin(
 	ctx context.Context,
 	loginID networkid.UserLoginID,
