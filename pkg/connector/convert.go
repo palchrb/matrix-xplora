@@ -407,7 +407,9 @@ func formatEmoticon(data json.RawMessage) string {
 	if emoji, ok := xploraEmoticonMap[id]; ok {
 		return emoji
 	}
-	return "[Sticker]"
+	// Unknown sticker: include the ID so missing entries can be added to
+	// xploraEmoticonMap (look the sticker up in the Xplora app).
+	return fmt.Sprintf("[Sticker %d]", id)
 }
 
 func derefStr(s *string) string {
