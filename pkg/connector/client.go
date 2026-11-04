@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,10 @@ import (
 // msg_id ≈ sentAtMs (delta = network round-trip only, typically < 500 ms).
 type recentSent struct {
 	sentAtMs int64
+	// windowMs is how far the FCM echo's msg_id may differ from sentAtMs.
+	// Text/emoticons echo within ~25 ms; image/voice uploads take longer
+	// because Xplora stamps msg_id when processing completes.
+	windowMs int64
 }
 
 // pendingLocateFix holds the best location fix received so far for a wuid
@@ -539,7 +544,11 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	// Record BEFORE sending so FCM echo suppression works correctly.
 	sentAtMs := time.Now().UnixMilli()
 	c.recentSentMu.Lock()
-	c.recentSents = append(c.recentSents, recentSent{sentAtMs: sentAtMs})
+	windowMs := int64(200)
+	if params.Type == "IMAGE" || params.Type == "VOICE" {
+		windowMs = 5000
+	}
+	c.recentSents = append(c.recentSents, recentSent{sentAtMs: sentAtMs, windowMs: windowMs})
 	c.recentSentMu.Unlock()
 
 	msgID, err := c.gql.SendChatMsg(ctx, meta.WUID, params)
@@ -752,7 +761,9 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 			CallType   int    `json:"call_type"`
 			CallName   string `json:"call_name"`
 			CallNumber string `json:"call_number"`
-			Duration   int    `json:"duration"`
+			// duration is an int in call_log pushes but a quoted string
+			// ("5") in chat_voice pushes; accept both.
+			Duration flexInt `json:"duration"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Content == nil {
@@ -934,7 +945,7 @@ func (c *XploraClient) parseFCMPayload(raw json.RawMessage) (xplora.ChatMessage,
 		callMap := map[string]any{
 			"call_type": callTypeIntToString(ct.CallType),
 			"call_name": ct.CallName,
-			"duration":  ct.Duration,
+			"duration":  int(ct.Duration),
 		}
 		if ct.CallNumber != "" {
 			callMap["call_number"] = ct.CallNumber
@@ -1021,7 +1032,7 @@ func (c *XploraClient) consumeRecentSent(fcmMsgID int64) bool {
 			continue // expired, drop
 		}
 		delta := fcmMsgID - s.sentAtMs
-		if !found && abs64(delta) <= 200 {
+		if !found && abs64(delta) <= s.windowMs {
 			c.log.Debug().
 				Int64("sent_at_ms", s.sentAtMs).
 				Int64("fcm_msg_id", fcmMsgID).
@@ -1652,4 +1663,23 @@ func ptrStr(s string) *string { return &s }
 // removeFile removes a file, ignoring not-exist errors.
 func removeFile(path string) {
 	_ = removeFileImpl(path)
+}
+
+// flexInt unmarshals a JSON number or a quoted number into an int.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil // ignore unparseable duration rather than dropping the whole push
+	}
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		*f = flexInt(v)
+	}
+	return nil
 }
