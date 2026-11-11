@@ -1,4 +1,4 @@
-FROM golang:1-alpine3.23 AS builder
+FROM golang:1.27-alpine3.23 AS builder
 
 RUN apk add --no-cache git ca-certificates build-base su-exec
 
@@ -23,7 +23,7 @@ FROM alpine:3.23
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache su-exec ca-certificates bash yq-go
+RUN apk upgrade --no-cache && apk add --no-cache su-exec ca-certificates bash yq-go
 
 COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /build/mautrix-xplora /usr/bin/mautrix-xplora
