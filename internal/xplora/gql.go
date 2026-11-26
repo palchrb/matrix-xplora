@@ -58,6 +58,21 @@ mutation RefreshToken($uid: String!, $refreshToken: String!) {
   }
 }`
 
+	// MutationRefreshTokenClientID is an experiment: refreshToken with a
+	// clientId argument, as signIn takes one. Whether the server accepts the
+	// argument is unknown; if it does not, the call fails validation before
+	// it runs, so the refresh token is not used up.
+	MutationRefreshTokenClientID = `
+mutation RefreshToken($uid: String!, $refreshToken: String!, $clientId: String) {
+  refreshToken(uid: $uid, refreshToken: $refreshToken, clientId: $clientId) {
+    id
+    token
+    refreshToken
+    expireDate
+    valid
+  }
+}`
+
 	// MutationSetFCMToken registers an FCM token with the Xplora backend.
 	// terminalType and isAndroid are hardcoded in the mutation body as per pyxplora_api.
 	MutationSetFCMToken = `
