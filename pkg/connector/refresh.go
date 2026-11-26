@@ -6,32 +6,33 @@ import (
 	"time"
 
 	"github.com/palchrb/matrix-xplora/internal/xplora"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/format"
 )
 
 // Token renewal.
 //
-// Xplora access tokens are valid for 35 days. The refreshToken mutation has
-// never been captured from the official app (pyxplora_api exposes it but never
-// calls it), so the right header and uid are unknown.
+// The refreshToken mutation has never been captured from the official app
+// (pyxplora_api exposes it but never calls it). What is known (2026-11-26):
 //
-// What is known (2026-11-26): with the Open app key and the parent user id the
-// server accepts the call. One minute after login it answered valid=false
-// without an error, and within 4 minutes the session was rejected (E000004)
-// and the refresh token was gone (E000021 Not found data). So that call IS a
-// real renewal that consumes the refresh token and invalidates the old access
-// token; the reply was discarded because of valid=false, and its contents are
-// unknown. The w360 and token headers are rejected (E000004), and other uids
-// are not found (E000021).
+//   - signIn issues an access token valid for 35 days.
+//   - refreshToken works with the Open app key and the parent user id. The
+//     w360 and token headers are rejected (E000004); other uids are not
+//     found (E000021).
+//   - A refresh answers valid=false but carries a NEW access token and a NEW
+//     refresh token. The new access token is valid for only 15 minutes. The
+//     old access token and refresh token stop working.
+//   - Refresh still works after the access token has expired (tested 4.5
+//     minutes after). After 3 hours a refresh token was gone; the limit in
+//     between is unknown.
 //
-// Until a renewal is known to work, the bridge never renews a working session
-// on its own: it only tries after the session has been rejected, and on the
-// user's explicit `renew` command. It warns in the management room before
-// expiry.
+// So the bridge renews shortly before each expiry (renewBefore), on startup
+// if the token is expired or nearly so, and whenever a call is rejected with
+// E000004. This repeats every ~10 minutes once the first 35-day token has
+// been renewed.
 const (
-	// expiryWarnWindow is how long before expiry the first warning is sent.
-	expiryWarnWindow = 72 * time.Hour
+	// renewBefore is how long before expiry the bridge renews the token.
+	renewBefore = 5 * time.Minute
+	// renewCheckInterval is how often the expiry is checked (locally).
+	renewCheckInterval = time.Minute
 	// refreshFailCooldown suppresses repeated attempts right after a failure,
 	// so a burst of E000004 errors does not trigger a burst of refreshes.
 	refreshFailCooldown = time.Minute
@@ -169,7 +170,12 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 // contained, without logging any secret: tokens are only compared to the
 // current ones.
 func (c *XploraClient) logUnusableRefresh(a refreshAttempt, old *xplora.Credentials, resp *xplora.RefreshTokenResponse) {
-	evt := c.log.Info().
+	evt := c.log.Info()
+	if resp.Token != "" && resp.Token != old.Token {
+		// The normal renewal reply: valid=false but with new tokens.
+		evt = c.log.Debug()
+	}
+	evt = evt.
 		Str("mode", a.mode()).
 		Bool("valid", resp.Valid).
 		Str("token", compareSecret(resp.Token, old.Token)).
@@ -235,80 +241,16 @@ func (c *XploraClient) verifyAfterRefresh(ctx context.Context, creds *xplora.Cre
 	return nil
 }
 
-// maybeWarnExpiry tells the user in the management room that the login is
-// about to expire. It warns once at 3 days and once at 24 hours per token.
-// It never calls the API.
-func (c *XploraClient) maybeWarnExpiry(ctx context.Context) {
-	creds := c.auth.Creds()
-	if creds == nil {
+// maybeRenew renews the token when it expires within renewBefore (or has
+// already expired). The expiry check is local; the API is only called when a
+// renewal is due. Failures are retried on the next check after the cooldown.
+func (c *XploraClient) maybeRenew(ctx context.Context) {
+	exp, ok := c.auth.ExpiresAt()
+	if !ok || time.Until(exp) > renewBefore {
 		return
 	}
-	exp, ok := xplora.ParseExpireDate(creds.ExpireDate)
-	if !ok {
-		return
+	c.log.Debug().Time("expires", exp).Msg("Token expires soon, renewing")
+	if err := c.tryRefreshToken(ctx); err != nil {
+		c.log.Warn().Err(err).Time("expires", exp).Msg("Scheduled token renewal failed")
 	}
-	left := time.Until(exp)
-	var level string
-	switch {
-	case left <= 0:
-		return // already expired; BAD_CREDENTIALS covers this
-	case left < 24*time.Hour:
-		level = "1d"
-	case left < expiryWarnWindow:
-		level = "3d"
-	default:
-		return
-	}
-	key := creds.ExpireDate + ":" + level
-	if c.meta.ExpiryWarning == key {
-		return
-	}
-	text := fmt.Sprintf(
-		"⚠️ Your Xplora login **%s** expires **%s** (in about %s). The bridge cannot renew it "+
-			"automatically, so it will stop sending and receiving messages then.\n\n"+
-			"Log in again before that to avoid an interruption: send `relogin %s` here.",
-		c.userLogin.RemoteName, exp.UTC().Format("2006-01-02 15:04 MST"), humanDuration(left), c.userLogin.ID,
-	)
-	if err := c.sendManagementNotice(ctx, text); err != nil {
-		c.log.Warn().Err(err).Msg("Failed to send login expiry warning")
-		return
-	}
-	c.meta.ExpiryWarning = key
-	c.userLogin.Save(ctx)
-}
-
-// sendManagementNotice sends a markdown notice to the user's management room.
-func (c *XploraClient) sendManagementNotice(ctx context.Context, text string) error {
-	room, err := c.userLogin.User.GetManagementRoom(ctx)
-	if err != nil {
-		return fmt.Errorf("get management room: %w", err)
-	}
-	content := format.RenderMarkdown(text, true, false)
-	content.MsgType = event.MsgNotice
-	_, err = c.connector.br.Bot.SendMessage(ctx, room, event.EventMessage, &event.Content{Parsed: &content}, nil)
-	return err
-}
-
-// humanDuration formats d as "2 days 5 hours" or "7 hours".
-func humanDuration(d time.Duration) string {
-	hours := int(d.Round(time.Hour) / time.Hour)
-	if hours < 1 {
-		return "less than an hour"
-	}
-	days, hours := hours/24, hours%24
-	switch {
-	case days == 0:
-		return plural(hours, "hour")
-	case hours == 0:
-		return plural(days, "day")
-	default:
-		return plural(days, "day") + " " + plural(hours, "hour")
-	}
-}
-
-func plural(n int, unit string) string {
-	if n == 1 {
-		return "1 " + unit
-	}
-	return fmt.Sprintf("%d %ss", n, unit)
 }
