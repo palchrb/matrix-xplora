@@ -22,7 +22,10 @@ type fakeXplora struct {
 	accept func(header, uid string) bool
 	// notYet, if set, makes matching refreshes answer valid=false with the
 	// current token, as the server did for Open + user id right after login.
-	notYet   func(header, uid string) bool
+	notYet func(header, uid string) bool
+	// rotate, if set, makes matching refreshes answer valid=false with a NEW
+	// token, i.e. a rotation the server does not flag as valid.
+	rotate   func(header, uid string) bool
 	newTok   string
 	myInfoOK func(header string) bool
 }
@@ -43,7 +46,9 @@ func (f *fakeXplora) RoundTrip(req *http.Request) (*http.Response, error) {
 	var out string
 	switch body.OperationName {
 	case "RefreshToken":
-		if f.notYet != nil && f.notYet(header, uid) {
+		if f.rotate != nil && f.rotate(header, uid) {
+			out = `{"data":{"refreshToken":{"id":"parent","token":"rotated","refreshToken":"rt2","expireDate":"1900000000","valid":false}}}`
+		} else if f.notYet != nil && f.notYet(header, uid) {
 			out = `{"data":{"refreshToken":{"id":"parent","token":"oldtok","refreshToken":"rt","expireDate":"1800000000","valid":false}}}`
 		} else if f.accept(header, uid) {
 			// refreshToken deliberately empty: the old one must be kept.
@@ -228,5 +233,42 @@ func TestRefreshNotYetIsLoggedWithoutSecrets(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("log leaks secret %q: %s", secret, out)
 		}
+	}
+}
+
+func TestRefreshValidFalseWithNewTokenIsTriedAndKept(t *testing.T) {
+	f := &fakeXplora{
+		accept:   func(string, string) bool { return false },
+		rotate:   func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+		myInfoOK: func(h string) bool { return strings.HasPrefix(h, "Bearer rotated:") },
+	}
+	creds := baseCreds()
+	creds.W360Token, creds.W360Secret = "", ""
+	c := newTestClient(t, f, creds)
+
+	if err := c.tryRefreshToken(t.Context()); err != nil {
+		t.Fatalf("rotated token that works should be kept: %v", err)
+	}
+	got := c.auth.Creds()
+	if got.Token != "rotated" || got.RefreshToken != "rt2" || got.RefreshMode != "open/userId" {
+		t.Fatalf("unexpected creds: %+v", got)
+	}
+}
+
+func TestRefreshValidFalseWithRejectedTokenRestoresOld(t *testing.T) {
+	f := &fakeXplora{
+		accept:   func(string, string) bool { return false },
+		rotate:   func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+		myInfoOK: func(string) bool { return false },
+	}
+	creds := baseCreds()
+	creds.W360Token, creds.W360Secret = "", ""
+	c := newTestClient(t, f, creds)
+
+	if err := c.tryRefreshToken(t.Context()); err == nil {
+		t.Fatal("expected an error when the rotated token is rejected")
+	}
+	if got := c.auth.Creds(); got.Token != "oldtok" || got.RefreshToken != "rt" {
+		t.Fatalf("old credentials not restored: %+v", got)
 	}
 }

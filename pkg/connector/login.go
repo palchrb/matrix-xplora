@@ -232,9 +232,6 @@ func (xl *XploraLogin) finishLogin(
 	}
 
 	ul.Client.Connect(ul.Log.WithContext(context.Background()))
-	if xc, ok := ul.Client.(*XploraClient); ok {
-		go xc.probeRefreshAfterLogin()
-	}
 
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
