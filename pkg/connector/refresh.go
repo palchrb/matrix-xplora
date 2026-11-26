@@ -14,25 +14,21 @@ import (
 //
 // Xplora access tokens are valid for 35 days. The refreshToken mutation has
 // never been captured from the official app (pyxplora_api exposes it but never
-// calls it), and the header/uid combination the bridge originally used was
-// rejected with E000004 even while the token was still valid. So the bridge
-// tries several combinations, remembers the one that works, tests renewal once
-// right after login, and warns the user in the management room before expiry
-// if renewal keeps failing.
+// calls it), so the right header and uid are unknown.
+//
+// A renewal test one minute after login killed a freshly issued session: the
+// Open key + user id combination answered valid=false without an error, and
+// the session was rejected with E000004 at the next health check. The server
+// most likely rotated the tokens and the bridge discarded the reply. So the
+// bridge never calls refreshToken on a session that still works: it only
+// tries renewal once the session has already been rejected, and warns the
+// user in the management room before expiry.
 const (
-	// refreshWindow is how long before expiry proactive renewal starts.
-	refreshWindow = 72 * time.Hour
-	// refreshRetryDelay is the minimum gap between failed proactive attempts...
-	refreshRetryDelay = 3 * time.Hour
-	// ...except during the last refreshUrgentWithin before expiry, when every
-	// 30-minute tick retries.
-	refreshUrgentWithin = 2 * time.Hour
+	// expiryWarnWindow is how long before expiry the first warning is sent.
+	expiryWarnWindow = 72 * time.Hour
 	// refreshFailCooldown suppresses repeated attempts right after a failure,
 	// so a burst of E000004 errors does not trigger a burst of refreshes.
 	refreshFailCooldown = time.Minute
-	// refreshProbeDelay is how long after login the renewal test runs, so it
-	// does not race the initial connect.
-	refreshProbeDelay = time.Minute
 )
 
 // refreshAttempt is one header/uid combination for the refreshToken mutation.
@@ -120,7 +116,12 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 		resp, err := c.gql.RefreshToken(ctx, a.uid, old.RefreshToken, a.variant)
 		if err == nil && (!resp.Valid || resp.Token == "") {
 			c.logUnusableRefresh(a, old, resp)
-			err = fmt.Errorf("server returned invalid token (valid=%t)", resp.Valid)
+			// valid=false with a new token may still be a rotation: the old
+			// token is then dead anyway, so try the new one (verified below,
+			// with the old credentials restored if it is rejected).
+			if resp.Token == "" || resp.Token == old.Token {
+				err = fmt.Errorf("server returned invalid token (valid=%t)", resp.Valid)
+			}
 		}
 		if err != nil {
 			c.log.Debug().Err(err).Str("mode", a.mode()).Msg("Token refresh variant failed")
@@ -223,28 +224,9 @@ func (c *XploraClient) verifyAfterRefresh(ctx context.Context, creds *xplora.Cre
 	return nil
 }
 
-// maybeProactiveRefresh renews the token once it is inside refreshWindow,
-// throttled after failures, and warns the user if renewal keeps failing.
-func (c *XploraClient) maybeProactiveRefresh(ctx context.Context) {
-	exp, ok := c.auth.ExpiresAt()
-	if !ok || time.Until(exp) > refreshWindow {
-		return
-	}
-	c.refreshMu.Lock()
-	lastFail := c.lastRefreshFail
-	c.refreshMu.Unlock()
-	if !lastFail.IsZero() && time.Since(lastFail) < refreshRetryDelay && time.Until(exp) > refreshUrgentWithin {
-		return
-	}
-	c.log.Info().Time("expires", exp).Msg("Proactive token refresh triggered")
-	if err := c.tryRefreshToken(ctx); err != nil {
-		c.log.Warn().Err(err).Time("expires", exp).Msg("Proactive token refresh failed")
-		c.maybeWarnExpiry(ctx)
-	}
-}
-
 // maybeWarnExpiry tells the user in the management room that the login is
 // about to expire. It warns once at 3 days and once at 24 hours per token.
+// It never calls the API.
 func (c *XploraClient) maybeWarnExpiry(ctx context.Context) {
 	creds := c.auth.Creds()
 	if creds == nil {
@@ -261,7 +243,7 @@ func (c *XploraClient) maybeWarnExpiry(ctx context.Context) {
 		return // already expired; BAD_CREDENTIALS covers this
 	case left < 24*time.Hour:
 		level = "1d"
-	case left < refreshWindow:
+	case left < expiryWarnWindow:
 		level = "3d"
 	default:
 		return
@@ -271,8 +253,8 @@ func (c *XploraClient) maybeWarnExpiry(ctx context.Context) {
 		return
 	}
 	text := fmt.Sprintf(
-		"⚠️ Your Xplora login **%s** expires **%s** (in about %s). Automatic renewal failed, "+
-			"so the bridge will stop sending and receiving messages then.\n\n"+
+		"⚠️ Your Xplora login **%s** expires **%s** (in about %s). The bridge cannot renew it "+
+			"automatically, so it will stop sending and receiving messages then.\n\n"+
 			"Log in again before that to avoid an interruption: send `relogin %s` here.",
 		c.userLogin.RemoteName, exp.UTC().Format("2006-01-02 15:04 MST"), humanDuration(left), c.userLogin.ID,
 	)
@@ -282,42 +264,6 @@ func (c *XploraClient) maybeWarnExpiry(ctx context.Context) {
 	}
 	c.meta.ExpiryWarning = key
 	c.userLogin.Save(ctx)
-}
-
-// probeRefreshAfterLogin tests renewal shortly after login, so a broken
-// renewal is found on the day of login instead of 35 days later. A successful
-// probe also records which header/uid combination works.
-func (c *XploraClient) probeRefreshAfterLogin() {
-	select {
-	case <-c.lifetimeCtx.Done():
-		return
-	case <-time.After(refreshProbeDelay):
-	}
-	ctx := c.log.WithContext(c.lifetimeCtx)
-	c.log.Info().Msg("Refresh probe: testing automatic token renewal")
-	var text string
-	if err := c.tryRefreshToken(ctx); err != nil {
-		c.log.Warn().Err(err).Msg("Refresh probe failed: automatic token renewal does not work")
-		until := "unknown"
-		if exp, ok := c.auth.ExpiresAt(); ok {
-			until = exp.UTC().Format("2006-01-02 15:04 MST")
-		}
-		text = fmt.Sprintf(
-			"ℹ️ Xplora: the test of automatic login renewal failed. Your login is valid until **%s**. "+
-				"The bridge will keep trying to renew it from 3 days before, and will remind you here "+
-				"to log in again if renewal still fails.", until)
-	} else {
-		mode := ""
-		if creds := c.auth.Creds(); creds != nil {
-			mode = creds.RefreshMode
-		}
-		c.log.Info().Str("mode", mode).Msg("Refresh probe succeeded")
-		text = fmt.Sprintf("✅ Xplora: the test of automatic login renewal succeeded (method `%s`). "+
-			"The bridge will renew your login automatically.", mode)
-	}
-	if err := c.sendManagementNotice(ctx, text); err != nil {
-		c.log.Warn().Err(err).Msg("Failed to send refresh probe result")
-	}
 }
 
 // sendManagementNotice sends a markdown notice to the user's management room.

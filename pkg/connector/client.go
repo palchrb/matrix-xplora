@@ -153,8 +153,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 	c.stopPolling()
 
-	// Proactively refresh the token if it is inside the refresh window.
-	c.maybeProactiveRefresh(ctx)
+	// Warn in the management room if the login expires soon. This never calls
+	// the API: calling refreshToken on a working session can invalidate it.
+	c.maybeWarnExpiry(ctx)
 
 	// Validate session with a lightweight API call.
 	myInfo, err := c.gql.GetMyInfo(ctx)
@@ -301,9 +302,8 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		}
 	}()
 
-	// Every 30 minutes, check whether the token is inside the refresh window
-	// (see maybeProactiveRefresh). The check is local; the API is only called
-	// when a refresh is due.
+	// Every 30 minutes, check whether the login expires soon and warn the user
+	// (see maybeWarnExpiry). The check is local and never calls the API.
 	//
 	// Every 10 minutes we also call GetMyInfo as a lightweight session health
 	// check. This detects mid-session invalidation (e.g. user logged in on
@@ -319,7 +319,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			case <-fcmCtx.Done():
 				return
 			case <-refreshTicker.C:
-				c.maybeProactiveRefresh(fcmCtx)
+				c.maybeWarnExpiry(fcmCtx)
 			case <-healthTicker.C:
 				if _, err := c.gql.GetMyInfo(fcmCtx); err != nil {
 					c.log.Warn().Err(err).Msg("Session health check failed")
