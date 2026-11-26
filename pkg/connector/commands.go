@@ -21,16 +21,15 @@ func RegisterCommands(br *bridgev2.Bridge) {
 	br.Commands.(*commands.Processor).AddHandler(cmdRenew)
 }
 
-// cmdRenew runs one token renewal on request. The bridge never renews a
-// working session on its own (see refresh.go), so this is how renewal is
-// tested: if the server's reply has no usable token, the session is lost and
-// the user has to log in again.
+// cmdRenew renews the Xplora token right away. The bridge also renews on its
+// own shortly before each expiry (see refresh.go); this is for testing and
+// troubleshooting.
 var cmdRenew = &commands.FullHandler{
 	Name:          "renew",
 	RequiresLogin: true,
 	Help: commands.HelpMeta{
 		Section:     commands.HelpSectionAuth,
-		Description: "Try to renew the Xplora login token now (experimental: may log the bridge out).",
+		Description: "Renew the Xplora login token now (the bridge also does this automatically).",
 	},
 	Func: func(ce *commands.Event) {
 		login := ce.User.GetDefaultLogin()

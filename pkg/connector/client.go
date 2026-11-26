@@ -153,9 +153,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 	c.stopPolling()
 
-	// Warn in the management room if the login expires soon. This never calls
-	// the API: calling refreshToken on a working session can invalidate it.
-	c.maybeWarnExpiry(ctx)
+	// Renew the token first if it has expired or expires soon, e.g. after the
+	// bridge was down for a while.
+	c.maybeRenew(ctx)
 
 	// Validate session with a lightweight API call.
 	myInfo, err := c.gql.GetMyInfo(ctx)
@@ -302,15 +302,15 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		}
 	}()
 
-	// Every 30 minutes, check whether the login expires soon and warn the user
-	// (see maybeWarnExpiry). The check is local and never calls the API.
+	// Every minute, check whether the token expires soon and renew it (see
+	// maybeRenew). The check is local; the API is only called when due.
 	//
 	// Every 10 minutes we also call GetMyInfo as a lightweight session health
 	// check. This detects mid-session invalidation (e.g. user logged in on
 	// another device) within 10 minutes without waiting for a bridge restart
 	// or an outgoing message. 6 calls/hour is well within acceptable API use.
 	go func() {
-		refreshTicker := time.NewTicker(30 * time.Minute)
+		refreshTicker := time.NewTicker(renewCheckInterval)
 		healthTicker := time.NewTicker(10 * time.Minute)
 		defer refreshTicker.Stop()
 		defer healthTicker.Stop()
@@ -319,7 +319,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			case <-fcmCtx.Done():
 				return
 			case <-refreshTicker.C:
-				c.maybeWarnExpiry(fcmCtx)
+				c.maybeRenew(fcmCtx)
 			case <-healthTicker.C:
 				if _, err := c.gql.GetMyInfo(fcmCtx); err != nil {
 					c.log.Warn().Err(err).Msg("Session health check failed")
@@ -544,6 +544,16 @@ func (c *XploraClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	c.recentSentMu.Unlock()
 
 	msgID, err := c.gql.SendChatMsg(ctx, meta.WUID, params)
+	if err != nil && isAuthError(err) && c.tryRefreshToken(ctx) == nil {
+		// The token expired between renewals: retry once with the new one.
+		// Re-record the send time so the echo of the retry is still matched.
+		c.consumeRecentSent(sentAtMs)
+		sentAtMs = time.Now().UnixMilli()
+		c.recentSentMu.Lock()
+		c.recentSents = append(c.recentSents, recentSent{sentAtMs: sentAtMs, windowMs: windowMs})
+		c.recentSentMu.Unlock()
+		msgID, err = c.gql.SendChatMsg(ctx, meta.WUID, params)
+	}
 	if err != nil {
 		c.consumeRecentSent(sentAtMs)
 		c.handleAPIError(ctx, err)
@@ -1563,8 +1573,13 @@ func (c *XploraClient) ensureWatchPortal(ctx context.Context, w xplora.WatchInfo
 // (E000004). If so, it attempts a token refresh; if that also fails it sends
 // a BAD_CREDENTIALS bridge state so the user sees it in Matrix immediately,
 // without needing a bridge restart. Returns true if the error was auth-related.
+// isAuthError reports whether err is an Xplora authentication failure.
+func isAuthError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "E000004")
+}
+
 func (c *XploraClient) handleAPIError(ctx context.Context, err error) bool {
-	if err == nil || !strings.Contains(err.Error(), "E000004") {
+	if !isAuthError(err) {
 		return false
 	}
 	c.log.Warn().Err(err).Msg("Xplora auth error detected mid-session, attempting token refresh")

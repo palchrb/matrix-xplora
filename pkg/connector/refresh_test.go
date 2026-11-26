@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -175,22 +176,6 @@ func TestRefreshDropsW360WhenRejectedAfterRefresh(t *testing.T) {
 	}
 }
 
-func TestHumanDuration(t *testing.T) {
-	cases := map[time.Duration]string{
-		20 * time.Minute:              "less than an hour",
-		time.Hour:                     "1 hour",
-		7 * time.Hour:                 "7 hours",
-		48 * time.Hour:                "2 days",
-		53 * time.Hour:                "2 days 5 hours",
-		25*time.Hour + 10*time.Minute: "1 day 1 hour",
-	}
-	for d, want := range cases {
-		if got := humanDuration(d); got != want {
-			t.Errorf("humanDuration(%v) = %q, want %q", d, got, want)
-		}
-	}
-}
-
 func TestParseExpireDate(t *testing.T) {
 	want := time.Unix(1795677868, 0)
 	for _, s := range []string{"1795677868", "1795677868000", want.UTC().Format(time.RFC3339)} {
@@ -292,5 +277,47 @@ func TestRefreshStopsAfterServerAnswersWithoutToken(t *testing.T) {
 	// open/userId is first and consumes the refresh token: nothing else is tried.
 	if refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want 1: %v", refreshCalls, f.calls)
+	}
+}
+
+func TestMaybeRenewOnlyNearExpiry(t *testing.T) {
+	f := &fakeXplora{
+		accept:   func(string, string) bool { return false },
+		rotate:   func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+		myInfoOK: func(h string) bool { return strings.HasPrefix(h, "Bearer rotated:") },
+	}
+	creds := baseCreds()
+	creds.W360Token, creds.W360Secret = "", ""
+
+	// Far from expiry: no API call at all.
+	creds.ExpireDate = fmt.Sprint(time.Now().Add(time.Hour).Unix())
+	c := newTestClient(t, f, creds)
+	c.maybeRenew(t.Context())
+	if len(f.calls) != 0 {
+		t.Fatalf("expected no API calls an hour before expiry, got %v", f.calls)
+	}
+
+	// Inside renewBefore: renews and keeps the rotated token.
+	creds.ExpireDate = fmt.Sprint(time.Now().Add(2 * time.Minute).Unix())
+	c = newTestClient(t, f, creds)
+	c.maybeRenew(t.Context())
+	if got := c.auth.Creds(); got.Token != "rotated" {
+		t.Fatalf("expected renewal near expiry, token = %q (calls %v)", got.Token, f.calls)
+	}
+}
+
+func TestMaybeRenewAfterExpiry(t *testing.T) {
+	f := &fakeXplora{
+		accept:   func(string, string) bool { return false },
+		rotate:   func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+		myInfoOK: func(h string) bool { return strings.HasPrefix(h, "Bearer rotated:") },
+	}
+	creds := baseCreds()
+	creds.W360Token, creds.W360Secret = "", ""
+	creds.ExpireDate = fmt.Sprint(time.Now().Add(-4 * time.Minute).Unix()) // e.g. after a restart
+	c := newTestClient(t, f, creds)
+	c.maybeRenew(t.Context())
+	if got := c.auth.Creds(); got.Token != "rotated" {
+		t.Fatalf("expected renewal of an expired token, token = %q", got.Token)
 	}
 }
