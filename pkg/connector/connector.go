@@ -146,6 +146,9 @@ type UserLoginMetadata struct {
 	FCMToken string `json:"fcmToken"`
 	// Children holds the list of child watches from the sign-in response.
 	Children []xplora.WatchInfo `json:"children,omitempty"`
+	// ExpiryWarning records the last login-expiry warning sent, as
+	// "<expireDate>:<level>", so each warning is sent once per token.
+	ExpiryWarning string `json:"expiryWarning,omitempty"`
 }
 
 // PortalMetadata stores Xplora-specific data for a bridged Matrix room.

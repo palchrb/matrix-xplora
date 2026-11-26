@@ -64,19 +64,66 @@ func (c *Client) setW360(token, secret string) {
 	c.w360Secret = secret
 }
 
-// backdoorAuth returns the H-BackDoor-Authorization header value.
-func (c *Client) backdoorAuth() string {
-	token := c.auth.Token()
-	if token == "" {
-		return "Open " + apiKey + ":" + apiSecret
-	}
+// ClearW360 forgets the in-memory w360 tokens so the plain token is used.
+func (c *Client) ClearW360() {
+	c.setW360("", "")
+}
+
+// w360 returns the w360 token/secret: the in-memory pair from the last signIn
+// if set, otherwise the pair persisted in the credentials file.
+func (c *Client) w360() (string, string) {
 	c.w360Mu.RLock()
-	w360Token, w360Secret := c.w360Token, c.w360Secret
+	t, s := c.w360Token, c.w360Secret
 	c.w360Mu.RUnlock()
-	if w360Token != "" && w360Secret != "" {
-		return "Bearer " + w360Token + ":" + w360Secret
+	if t != "" && s != "" {
+		return t, s
 	}
-	return "Bearer " + token + ":" + apiSecret
+	return c.auth.W360()
+}
+
+// AuthVariant selects how the H-BackDoor-Authorization header is built.
+type AuthVariant string
+
+const (
+	AuthW360  AuthVariant = "w360"  // Bearer <w360 token>:<w360 secret> (official app)
+	AuthToken AuthVariant = "token" // Bearer <token>:<apiSecret>
+	AuthOpen  AuthVariant = "open"  // Open <apiKey>:<apiSecret> (unauthenticated)
+)
+
+// AuthHeader returns the header value for variant v, or false if the variant
+// cannot be built (e.g. no w360 tokens or no access token).
+func (c *Client) AuthHeader(v AuthVariant) (string, bool) {
+	switch v {
+	case AuthW360:
+		t, s := c.w360()
+		if t == "" || s == "" {
+			return "", false
+		}
+		return "Bearer " + t + ":" + s, true
+	case AuthToken:
+		token := c.auth.Token()
+		if token == "" {
+			return "", false
+		}
+		return "Bearer " + token + ":" + apiSecret, true
+	case AuthOpen:
+		return "Open " + apiKey + ":" + apiSecret, true
+	}
+	return "", false
+}
+
+// backdoorAuth returns the H-BackDoor-Authorization header value for normal
+// calls: w360 if available, else the access token, else the open key.
+func (c *Client) backdoorAuth() string {
+	if c.auth.Token() == "" {
+		h, _ := c.AuthHeader(AuthOpen)
+		return h
+	}
+	if h, ok := c.AuthHeader(AuthW360); ok {
+		return h
+	}
+	h, _ := c.AuthHeader(AuthToken)
+	return h
 }
 
 // graphQLRequest is the JSON body for a GraphQL request.
@@ -125,6 +172,11 @@ func (e graphQLError) Error() string {
 // Returns the "data" field of the response as json.RawMessage.
 // Returns an error if the HTTP status is not 200 or if the response contains errors.
 func (c *Client) do(ctx context.Context, query string, variables map[string]any) (json.RawMessage, error) {
+	return c.doWithAuth(ctx, query, variables, c.backdoorAuth())
+}
+
+// doWithAuth is do with an explicit H-BackDoor-Authorization header value.
+func (c *Client) doWithAuth(ctx context.Context, query string, variables map[string]any, authHeader string) (json.RawMessage, error) {
 	reqBody, err := json.Marshal(graphQLRequest{
 		Query:         query,
 		Variables:     variables,
@@ -152,7 +204,7 @@ func (c *Client) do(ctx context.Context, query string, variables map[string]any)
 	req.Header.Set("User-Agent", "okhttp/5.3.2")
 	req.Header.Set("H-Date", now.Format(http.TimeFormat))
 	req.Header.Set("H-Tid", strconv.FormatInt(now.Unix(), 10))
-	req.Header.Set("H-BackDoor-Authorization", c.backdoorAuth())
+	req.Header.Set("H-BackDoor-Authorization", authHeader)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

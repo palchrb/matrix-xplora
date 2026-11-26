@@ -49,13 +49,22 @@ func (c *Client) SignIn(ctx context.Context, countryCode, phone, email, password
 	return resp, nil
 }
 
-// RefreshToken exchanges a refresh token for a new access token.
-func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string) (*RefreshTokenResponse, error) {
+// RefreshToken exchanges a refresh token for a new access token, sending the
+// H-BackDoor-Authorization header built for variant v.
+//
+// The correct uid and header for this mutation are not known: it has never
+// been captured from the official app, and pyxplora_api exposes it but never
+// calls it. Callers try several combinations.
+func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string, v AuthVariant) (*RefreshTokenResponse, error) {
+	header, ok := c.AuthHeader(v)
+	if !ok {
+		return nil, fmt.Errorf("auth variant %s unavailable", v)
+	}
 	vars := map[string]any{
 		"uid":          uid,
 		"refreshToken": refreshToken,
 	}
-	data, err := c.do(ctx, MutationRefreshToken, vars)
+	data, err := c.doWithAuth(ctx, MutationRefreshToken, vars, header)
 	if err != nil {
 		return nil, err
 	}
