@@ -40,12 +40,19 @@ const (
 
 // refreshAttempt is one header/uid combination for the refreshToken mutation.
 type refreshAttempt struct {
-	variant xplora.AuthVariant
-	uidKind string
-	uid     string
+	variant  xplora.AuthVariant
+	uidKind  string
+	uid      string
+	clientID string // non-empty: send clientId too (experiment, see renew command)
 }
 
-func (a refreshAttempt) mode() string { return string(a.variant) + "/" + a.uidKind }
+func (a refreshAttempt) mode() string {
+	m := string(a.variant) + "/" + a.uidKind
+	if a.clientID != "" {
+		m += "+clientId"
+	}
+	return m
+}
 
 // refreshAttempts lists the combinations to try, the last successful one first.
 func (c *XploraClient) refreshAttempts(creds *xplora.Credentials) []refreshAttempt {
@@ -98,7 +105,7 @@ func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
 	if !c.lastRefreshFail.IsZero() && time.Since(c.lastRefreshFail) < refreshFailCooldown {
 		return fmt.Errorf("token refresh failed %s ago; not retrying yet", time.Since(c.lastRefreshFail).Round(time.Second))
 	}
-	err := c.refreshLocked(ctx)
+	err := c.refreshLocked(ctx, c.refreshAttempts)
 	if err != nil {
 		c.lastRefreshFail = time.Now()
 	} else {
@@ -107,12 +114,27 @@ func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
 	return err
 }
 
-func (c *XploraClient) refreshLocked(ctx context.Context) error {
+// tryRefreshTokenWithClientID renews with the Open key and the parent user id
+// only, sending the stored clientId as an extra argument. It is an
+// experiment run by `renew clientid`: if the server issues a longer-lived
+// token this way, that is what the official app likely does.
+func (c *XploraClient) tryRefreshTokenWithClientID(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if c.meta.ClientID == "" {
+		return fmt.Errorf("no clientId stored for this login")
+	}
+	return c.refreshLocked(ctx, func(creds *xplora.Credentials) []refreshAttempt {
+		return []refreshAttempt{{variant: xplora.AuthOpen, uidKind: "userId", uid: creds.UserID, clientID: c.meta.ClientID}}
+	})
+}
+
+func (c *XploraClient) refreshLocked(ctx context.Context, attemptsFor func(*xplora.Credentials) []refreshAttempt) error {
 	old := c.auth.Creds()
 	if old == nil || old.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
 	}
-	attempts := c.refreshAttempts(old)
+	attempts := attemptsFor(old)
 	if len(attempts) == 0 {
 		return fmt.Errorf("no refresh variants available")
 	}
@@ -120,7 +142,7 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 	tried := make([]string, 0, len(attempts))
 	for _, a := range attempts {
 		tried = append(tried, a.mode())
-		resp, err := c.gql.RefreshToken(ctx, a.uid, old.RefreshToken, a.variant)
+		resp, err := c.gql.RefreshToken(ctx, a.uid, old.RefreshToken, a.variant, a.clientID)
 		if err == nil && (!resp.Valid || resp.Token == "") {
 			c.logUnusableRefresh(a, old, resp)
 			// valid=false with a new token may still be a rotation: the old

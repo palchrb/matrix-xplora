@@ -15,12 +15,24 @@ import (
 )
 
 // xploraEmoticonMap maps Xplora emoticon IDs to Unicode emoji characters.
-// Source: pyxplora_api status.py — M<id> enum values.
+// Source: pyxplora_api status.py — M<id> enum values, except 1015, 1019, 1021
+// and 1023, which pyxplora_api leaves unmapped (or maps to a duplicate 😏).
+// Those were chosen from the sticker images in Ludy87/xplora_watch
+// (custom_components/xplora_watch/emojis/emoji_<id>.png); no Unicode emoji
+// matches them exactly:
+//
+//	1015 shy smile, blushing         -> 😊
+//	1019 wrapped in a blanket, eyes closed (sleepy) -> 😴
+//	1021 flat eyes, arms crossed     -> 😒
+//	1023 side-glance with sweat drop -> 😥
+//
+// Each emoji appears once, so emojiToXploraEmoticon maps it back to one sticker.
 var xploraEmoticonMap = map[int]string{
 	1001: "😄", 1002: "😏", 1003: "😘", 1004: "😅", 1005: "😂",
 	1006: "😭", 1007: "😍", 1008: "😎", 1009: "😜", 1010: "😳",
-	1011: "🥱", 1012: "👏", 1013: "😡", 1014: "👍", 1015: "😏",
-	1016: "😓", 1017: "🍧", 1018: "😮", 1020: "🎁", 1022: "☺️", 1024: "🌹",
+	1011: "🥱", 1012: "👏", 1013: "😡", 1014: "👍", 1015: "😊",
+	1016: "😓", 1017: "🍧", 1018: "😮", 1019: "😴", 1020: "🎁",
+	1021: "😒", 1022: "☺️", 1023: "😥", 1024: "🌹",
 }
 
 // emojiToXploraEmoticon is the reverse of xploraEmoticonMap: maps a Unicode

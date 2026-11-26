@@ -55,7 +55,9 @@ func (c *Client) SignIn(ctx context.Context, countryCode, phone, email, password
 // The correct uid and header for this mutation are not known: it has never
 // been captured from the official app, and pyxplora_api exposes it but never
 // calls it. Callers try several combinations.
-func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string, v AuthVariant) (*RefreshTokenResponse, error) {
+//
+// A non-empty clientID uses MutationRefreshTokenClientID (an experiment).
+func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string, v AuthVariant, clientID string) (*RefreshTokenResponse, error) {
 	header, ok := c.AuthHeader(v)
 	if !ok {
 		return nil, fmt.Errorf("auth variant %s unavailable", v)
@@ -64,7 +66,12 @@ func (c *Client) RefreshToken(ctx context.Context, uid, refreshToken string, v A
 		"uid":          uid,
 		"refreshToken": refreshToken,
 	}
-	data, err := c.doWithAuth(ctx, MutationRefreshToken, vars, header)
+	mutation := MutationRefreshToken
+	if clientID != "" {
+		vars["clientId"] = clientID
+		mutation = MutationRefreshTokenClientID
+	}
+	data, err := c.doWithAuth(ctx, mutation, vars, header)
 	if err != nil {
 		return nil, err
 	}
