@@ -18,6 +18,43 @@ import (
 func RegisterCommands(br *bridgev2.Bridge) {
 	br.Commands.(*commands.Processor).AddHandler(cmdLocate)
 	br.Commands.(*commands.Processor).AddHandler(cmdStickers)
+	br.Commands.(*commands.Processor).AddHandler(cmdRenew)
+}
+
+// cmdRenew runs one token renewal on request. The bridge never renews a
+// working session on its own (see refresh.go), so this is how renewal is
+// tested: if the server's reply has no usable token, the session is lost and
+// the user has to log in again.
+var cmdRenew = &commands.FullHandler{
+	Name:          "renew",
+	RequiresLogin: true,
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionAuth,
+		Description: "Try to renew the Xplora login token now (experimental: may log the bridge out).",
+	},
+	Func: func(ce *commands.Event) {
+		login := ce.User.GetDefaultLogin()
+		if login == nil {
+			ce.Reply("You are not logged in.")
+			return
+		}
+		client, ok := login.Client.(*XploraClient)
+		if !ok {
+			ce.Reply("Internal error: unexpected client type.")
+			return
+		}
+		before, _ := client.auth.ExpiresAt()
+		client.log.Info().Time("expires", before).Msg("Manual token renewal requested")
+		if err := client.tryRefreshToken(ce.Ctx); err != nil {
+			client.log.Warn().Err(err).Msg("Manual token renewal failed")
+			ce.Reply("❌ Renewal failed: %v\n\nIf the bridge reports BAD_CREDENTIALS, log in again with `relogin %s`.", err, login.ID)
+			return
+		}
+		creds := client.auth.Creds()
+		after, _ := client.auth.ExpiresAt()
+		ce.Reply("✅ Renewal succeeded (method `%s`). Login valid until **%s** (was %s).",
+			creds.RefreshMode, after.UTC().Format("2006-01-02 15:04 MST"), before.UTC().Format("2006-01-02 15:04 MST"))
+	},
 }
 
 var cmdLocate = &commands.FullHandler{
