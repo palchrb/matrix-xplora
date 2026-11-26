@@ -17,9 +17,12 @@ import (
 // fakeXplora answers refreshToken and readMyInfo. accept decides whether a
 // refresh with the given header and uid succeeds.
 type fakeXplora struct {
-	mu       sync.Mutex
-	calls    []string // "op header uid"
-	accept   func(header, uid string) bool
+	mu     sync.Mutex
+	calls  []string // "op header uid"
+	accept func(header, uid string) bool
+	// notYet, if set, makes matching refreshes answer valid=false with the
+	// current token, as the server did for Open + user id right after login.
+	notYet   func(header, uid string) bool
 	newTok   string
 	myInfoOK func(header string) bool
 }
@@ -40,7 +43,9 @@ func (f *fakeXplora) RoundTrip(req *http.Request) (*http.Response, error) {
 	var out string
 	switch body.OperationName {
 	case "RefreshToken":
-		if f.accept(header, uid) {
+		if f.notYet != nil && f.notYet(header, uid) {
+			out = `{"data":{"refreshToken":{"id":"parent","token":"oldtok","refreshToken":"rt","expireDate":"1800000000","valid":false}}}`
+		} else if f.accept(header, uid) {
 			// refreshToken deliberately empty: the old one must be kept.
 			out = `{"data":{"refreshToken":{"id":"x","token":"` + f.newTok + `","refreshToken":"","expireDate":"1900000000","valid":true}}}`
 		} else {
@@ -96,18 +101,18 @@ func TestRefreshTriesVariantsAndKeepsRefreshToken(t *testing.T) {
 	if got.RefreshMode != "token/child" {
 		t.Fatalf("RefreshMode = %q, want token/child", got.RefreshMode)
 	}
-	// w360 variants (3 uids) are tried before token/userId, token/sessionId, token/child.
+	// Open (3 uids) and w360 (3 uids) are tried before token/userId, token/sessionId, token/child.
 	refreshCalls := 0
 	for _, call := range f.calls {
 		if strings.HasPrefix(call, "RefreshToken ") {
 			refreshCalls++
 		}
 	}
-	if refreshCalls != 6 {
-		t.Fatalf("refresh calls = %d, want 6: %v", refreshCalls, f.calls)
+	if refreshCalls != 9 {
+		t.Fatalf("refresh calls = %d, want 9: %v", refreshCalls, f.calls)
 	}
-	if !strings.HasPrefix(f.calls[0], "RefreshToken Bearer w3t:w3s parent") {
-		t.Fatalf("first attempt = %q, want w360 with parent uid", f.calls[0])
+	if !strings.HasPrefix(f.calls[0], "RefreshToken Open ") || !strings.HasSuffix(f.calls[0], " parent") {
+		t.Fatalf("first attempt = %q, want open with parent uid", f.calls[0])
 	}
 }
 
@@ -191,5 +196,37 @@ func TestParseExpireDate(t *testing.T) {
 	}
 	if _, ok := xplora.ParseExpireDate(""); ok {
 		t.Error("empty expireDate should not parse")
+	}
+}
+
+func TestRefreshNotYetIsLoggedWithoutSecrets(t *testing.T) {
+	f := &fakeXplora{
+		accept: func(string, string) bool { return false },
+		notYet: func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+	}
+	c := newTestClient(t, f, baseCreds())
+	var logBuf bytes.Buffer
+	c.log = zerolog.New(&logBuf)
+
+	if err := c.tryRefreshToken(t.Context()); err == nil {
+		t.Fatal("valid=false must not count as a successful refresh")
+	}
+	if got := c.auth.Creds(); got.Token != "oldtok" || got.RefreshMode != "" {
+		t.Fatalf("credentials changed after valid=false: %+v", got)
+	}
+	out := logBuf.String()
+	for _, want := range []string{
+		`"message":"Token refresh returned no usable token"`,
+		`"mode":"open/userId"`, `"valid":false`, `"token":"same"`,
+		`"refresh_token":"same"`, `"id":"userId"`, `"expire_date":"1800000000"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %s\nlog: %s", want, out)
+		}
+	}
+	for _, secret := range []string{"oldtok", `"rt"`, "w3t", "w3s"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("log leaks secret %q: %s", secret, out)
+		}
 	}
 }

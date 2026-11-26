@@ -64,7 +64,10 @@ func (c *XploraClient) refreshAttempts(creds *xplora.Credentials) []refreshAttem
 	c.childrenMu.RUnlock()
 
 	var out []refreshAttempt
-	for _, v := range []xplora.AuthVariant{xplora.AuthW360, xplora.AuthToken, xplora.AuthOpen} {
+	// Open first: with the app key the server accepts the call and finds the
+	// refresh token (it answered valid=false a minute after login), while the
+	// w360 and token headers are rejected with E000004.
+	for _, v := range []xplora.AuthVariant{xplora.AuthOpen, xplora.AuthW360, xplora.AuthToken} {
 		if _, ok := c.gql.AuthHeader(v); !ok {
 			continue
 		}
@@ -116,6 +119,7 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 		tried = append(tried, a.mode())
 		resp, err := c.gql.RefreshToken(ctx, a.uid, old.RefreshToken, a.variant)
 		if err == nil && (!resp.Valid || resp.Token == "") {
+			c.logUnusableRefresh(a, old, resp)
 			err = fmt.Errorf("server returned invalid token (valid=%t)", resp.Valid)
 		}
 		if err != nil {
@@ -147,6 +151,52 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 	}
 	c.log.Warn().Strs("tried", tried).Err(lastErr).Msg("All token refresh variants failed")
 	return fmt.Errorf("all %d refresh variants failed, last error: %w", len(attempts), lastErr)
+}
+
+// logUnusableRefresh logs what a refresh response without a usable token
+// contained, without logging any secret: tokens are only compared to the
+// current ones.
+func (c *XploraClient) logUnusableRefresh(a refreshAttempt, old *xplora.Credentials, resp *xplora.RefreshTokenResponse) {
+	evt := c.log.Info().
+		Str("mode", a.mode()).
+		Bool("valid", resp.Valid).
+		Str("token", compareSecret(resp.Token, old.Token)).
+		Str("refresh_token", compareSecret(resp.RefreshToken, old.RefreshToken)).
+		Str("id", idKind(resp.ID, old)).
+		Str("expire_date", string(resp.ExpireDate))
+	if exp, ok := xplora.ParseExpireDate(string(resp.ExpireDate)); ok {
+		evt = evt.Time("expires", exp)
+	}
+	if cur, ok := xplora.ParseExpireDate(old.ExpireDate); ok {
+		evt = evt.Time("current_expires", cur)
+	}
+	evt.Msg("Token refresh returned no usable token")
+}
+
+// compareSecret describes got relative to current without revealing either.
+func compareSecret(got, current string) string {
+	switch {
+	case got == "":
+		return "empty"
+	case got == current:
+		return "same"
+	default:
+		return "new"
+	}
+}
+
+// idKind says which known ID a response id matches.
+func idKind(id string, creds *xplora.Credentials) string {
+	switch {
+	case id == "":
+		return "empty"
+	case id == creds.UserID:
+		return "userId"
+	case id == creds.SessionID:
+		return "sessionId"
+	default:
+		return "other"
+	}
 }
 
 // verifyAfterRefresh checks that normal API calls work with the new token. If
