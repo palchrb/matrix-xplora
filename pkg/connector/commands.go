@@ -28,10 +28,8 @@ var cmdRenew = &commands.FullHandler{
 	Name:          "renew",
 	RequiresLogin: true,
 	Help: commands.HelpMeta{
-		Section: commands.HelpSectionAuth,
-		Description: "Renew the Xplora login token now (the bridge also does this automatically). " +
-			"`renew clientid` tries an experimental renewal that also sends the device clientId.",
-		Args: "[clientid]",
+		Section:     commands.HelpSectionAuth,
+		Description: "Renew the Xplora login token now (the bridge also does this automatically).",
 	},
 	Func: func(ce *commands.Event) {
 		login := ce.User.GetDefaultLogin()
@@ -45,20 +43,8 @@ var cmdRenew = &commands.FullHandler{
 			return
 		}
 		before, _ := client.auth.ExpiresAt()
-		withClientID := len(ce.Args) > 0 && strings.EqualFold(ce.Args[0], "clientid")
-		client.log.Info().Time("expires", before).Bool("with_client_id", withClientID).Msg("Manual token renewal requested")
-		renew := client.tryRefreshToken
-		if withClientID {
-			renew = client.tryRefreshTokenWithClientID
-		}
-		if err := renew(ce.Ctx); err != nil {
-			if withClientID {
-				client.log.Warn().Err(err).Msg("Renewal with clientId failed")
-				ce.Reply("❌ Renewal with clientId failed: %v\n\n"+
-					"If this is a validation error (e.g. `E000001 failed.`), the server does not accept clientId "+
-					"and nothing changed: normal renewal keeps working.", err)
-				return
-			}
+		client.log.Info().Time("expires", before).Msg("Manual token renewal requested")
+		if err := client.tryRefreshToken(ce.Ctx); err != nil {
 			client.log.Warn().Err(err).Msg("Manual token renewal failed")
 			ce.Reply("❌ Renewal failed: %v\n\nIf the bridge reports BAD_CREDENTIALS, log in again with `relogin %s`.", err, login.ID)
 			return
