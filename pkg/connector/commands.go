@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/palchrb/matrix-xplora/internal/xplora"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/event"
@@ -19,6 +20,127 @@ func RegisterCommands(br *bridgev2.Bridge) {
 	br.Commands.(*commands.Processor).AddHandler(cmdLocate)
 	br.Commands.(*commands.Processor).AddHandler(cmdStickers)
 	br.Commands.(*commands.Processor).AddHandler(cmdRenew)
+	br.Commands.(*commands.Processor).AddHandler(cmdSchema)
+}
+
+// authKeywords selects the root operations shown by `schema` without an
+// argument: everything that looks related to tokens, sign-in or sessions.
+var authKeywords = []string{"token", "sign", "login", "logout", "refresh", "auth", "session", "issue", "password", "client"}
+
+// cmdSchema asks the Xplora API, via GraphQL introspection, how its auth
+// operations are defined. Read-only: it never calls a mutation.
+var cmdSchema = &commands.FullHandler{
+	Name:          "schema",
+	RequiresLogin: true,
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionUnclassified,
+		Description: "Show how Xplora's token and sign-in operations are defined (GraphQL introspection). With a type name, show that type.",
+		Args:        "[_type name_]",
+	},
+	Func: func(ce *commands.Event) {
+		login := ce.User.GetDefaultLogin()
+		if login == nil {
+			ce.Reply("You are not logged in.")
+			return
+		}
+		client, ok := login.Client.(*XploraClient)
+		if !ok {
+			ce.Reply("Internal error: unexpected client type.")
+			return
+		}
+		if len(ce.Args) > 0 {
+			replyType(ce, client, ce.Args[0])
+			return
+		}
+
+		queryRoot, mutationRoot, err := client.gql.IntrospectRoots(ce.Ctx)
+		if err != nil {
+			client.log.Warn().Err(err).Msg("Introspection failed")
+			ce.Reply("Introspection failed (it may be disabled on the server): %v", err)
+			return
+		}
+		var out strings.Builder
+		returnTypes := map[string]bool{}
+		for _, root := range []string{mutationRoot, queryRoot} {
+			if root == "" {
+				continue
+			}
+			t, err := client.gql.IntrospectType(ce.Ctx, root)
+			if err != nil || t == nil {
+				fmt.Fprintf(&out, "%s: could not read (%v)\n\n", root, err)
+				continue
+			}
+			var matches []xplora.Field
+			for _, f := range t.Fields {
+				name := strings.ToLower(f.Name)
+				for _, kw := range authKeywords {
+					if strings.Contains(name, kw) {
+						matches = append(matches, f)
+						break
+					}
+				}
+			}
+			fmt.Fprintf(&out, "%s (%d of %d operations match):\n", root, len(matches), len(t.Fields))
+			for _, f := range matches {
+				fmt.Fprintf(&out, "  %s\n", f.Signature())
+				if base := f.Type.BaseName(); base != "" && !isScalar(base) {
+					returnTypes[base] = true
+				}
+			}
+			out.WriteString("\n")
+		}
+		// Show the fields of the types these operations return (e.g. what a
+		// refreshToken reply can contain).
+		names := make([]string, 0, len(returnTypes))
+		for n := range returnTypes {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			writeType(ce, client, &out, n)
+		}
+		client.log.Info().Str("schema", out.String()).Msg("Introspected Xplora auth schema")
+		ce.Reply("```\n%s```", out.String())
+	},
+}
+
+func isScalar(name string) bool {
+	switch name {
+	case "String", "Int", "Float", "Boolean", "ID":
+		return true
+	}
+	return false
+}
+
+// writeType appends the fields (or input fields / enum values) of one type.
+func writeType(ce *commands.Event, client *XploraClient, out *strings.Builder, name string) {
+	t, err := client.gql.IntrospectType(ce.Ctx, name)
+	if err != nil {
+		fmt.Fprintf(out, "%s: could not read (%v)\n\n", name, err)
+		return
+	}
+	if t == nil {
+		fmt.Fprintf(out, "%s: no such type\n\n", name)
+		return
+	}
+	fmt.Fprintf(out, "%s %s:\n", t.Kind, t.Name)
+	for _, f := range t.Fields {
+		fmt.Fprintf(out, "  %s\n", f.Signature())
+	}
+	for _, f := range t.InputFields {
+		fmt.Fprintf(out, "  %s: %s\n", f.Name, f.Type.String())
+	}
+	for _, v := range t.EnumValues {
+		fmt.Fprintf(out, "  %s\n", v.Name)
+	}
+	out.WriteString("\n")
+}
+
+func replyType(ce *commands.Event, client *XploraClient, name string) {
+	var out strings.Builder
+	writeType(ce, client, &out, name)
+	client.log.Info().Str("type", name).Str("schema", out.String()).Msg("Introspected Xplora type")
+	ce.Reply("```\n%s```", out.String())
 }
 
 // cmdRenew renews the Xplora token right away. The bridge also renews on its
