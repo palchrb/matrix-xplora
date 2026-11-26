@@ -272,3 +272,25 @@ func TestRefreshValidFalseWithRejectedTokenRestoresOld(t *testing.T) {
 		t.Fatalf("old credentials not restored: %+v", got)
 	}
 }
+
+func TestRefreshStopsAfterServerAnswersWithoutToken(t *testing.T) {
+	f := &fakeXplora{
+		accept: func(string, string) bool { return true }, // later variants would "work"
+		notYet: func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+	}
+	c := newTestClient(t, f, baseCreds())
+
+	if err := c.tryRefreshToken(t.Context()); err == nil {
+		t.Fatal("expected failure when the server answers without a usable token")
+	}
+	refreshCalls := 0
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, "RefreshToken ") {
+			refreshCalls++
+		}
+	}
+	// open/userId is first and consumes the refresh token: nothing else is tried.
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1: %v", refreshCalls, f.calls)
+	}
+}

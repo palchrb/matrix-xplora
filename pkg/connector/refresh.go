@@ -16,13 +16,19 @@ import (
 // never been captured from the official app (pyxplora_api exposes it but never
 // calls it), so the right header and uid are unknown.
 //
-// A renewal test one minute after login killed a freshly issued session: the
-// Open key + user id combination answered valid=false without an error, and
-// the session was rejected with E000004 at the next health check. The server
-// most likely rotated the tokens and the bridge discarded the reply. So the
-// bridge never calls refreshToken on a session that still works: it only
-// tries renewal once the session has already been rejected, and warns the
-// user in the management room before expiry.
+// What is known (2026-11-26): with the Open app key and the parent user id the
+// server accepts the call. One minute after login it answered valid=false
+// without an error, and within 4 minutes the session was rejected (E000004)
+// and the refresh token was gone (E000021 Not found data). So that call IS a
+// real renewal that consumes the refresh token and invalidates the old access
+// token; the reply was discarded because of valid=false, and its contents are
+// unknown. The w360 and token headers are rejected (E000004), and other uids
+// are not found (E000021).
+//
+// Until a renewal is known to work, the bridge never renews a working session
+// on its own: it only tries after the session has been rejected, and on the
+// user's explicit `renew` command. It warns in the management room before
+// expiry.
 const (
 	// expiryWarnWindow is how long before expiry the first warning is sent.
 	expiryWarnWindow = 72 * time.Hour
@@ -120,7 +126,12 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 			// token is then dead anyway, so try the new one (verified below,
 			// with the old credentials restored if it is rejected).
 			if resp.Token == "" || resp.Token == old.Token {
-				err = fmt.Errorf("server returned invalid token (valid=%t)", resp.Valid)
+				// The server processed the call, which consumes the refresh
+				// token, so no other variant can succeed now.
+				c.log.Warn().Str("mode", a.mode()).Strs("tried", tried).
+					Msg("Token refresh answered without a usable token; refresh token likely consumed")
+				return fmt.Errorf("server answered %s without a usable token (valid=%t); the refresh token is likely used up",
+					a.mode(), resp.Valid)
 			}
 		}
 		if err != nil {
