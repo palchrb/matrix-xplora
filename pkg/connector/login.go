@@ -168,12 +168,21 @@ func (xl *XploraLogin) finishLogin(
 	}
 	log.Info().Str("user_id", authResp.User.ID).Msg("Xplora sign-in succeeded")
 
-	if err := auth.SetCredentials(&xplora.Credentials{
+	creds := &xplora.Credentials{
 		Token:        authResp.Token,
 		RefreshToken: authResp.RefreshToken,
 		ExpireDate:   string(authResp.ExpireDate),
 		UserID:       authResp.User.ID,
-	}); err != nil {
+		SessionID:    authResp.ID,
+	}
+	if authResp.W360 != nil {
+		creds.W360Token = authResp.W360.Token
+		creds.W360Secret = authResp.W360.Secret
+	}
+	if exp, ok := xplora.ParseExpireDate(creds.ExpireDate); ok {
+		log.Info().Time("expires", exp).Bool("w360", creds.W360Token != "").Msg("Xplora token issued")
+	}
+	if err := auth.SetCredentials(creds); err != nil {
 		return nil, fmt.Errorf("saving Xplora credentials: %w", err)
 	}
 
@@ -208,6 +217,12 @@ func (xl *XploraLogin) finishLogin(
 		Metadata:   meta,
 	}, &bridgev2.NewLoginParams{
 		LoadUserLogin: func(_ context.Context, login *bridgev2.UserLogin) error {
+			// On re-login with the same account, bridgev2 reuses the existing
+			// UserLogin and replaces its Client without disconnecting the old
+			// one. Stop it first, or two FCM listeners and pollers would run.
+			if old, ok := login.Client.(*XploraClient); ok && old != nil {
+				old.Disconnect()
+			}
 			login.Client = newXploraClient(xl.connector, login, auth, gqlClient, meta)
 			return nil
 		},
@@ -217,6 +232,9 @@ func (xl *XploraLogin) finishLogin(
 	}
 
 	ul.Client.Connect(ul.Log.WithContext(context.Background()))
+	if xc, ok := ul.Client.(*XploraClient); ok {
+		go xc.probeRefreshAfterLogin()
+	}
 
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,

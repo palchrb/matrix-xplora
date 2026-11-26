@@ -84,6 +84,9 @@ type XploraClient struct {
 	// health-check ticker, a polling error, and a proactive refresh cannot
 	// race and invalidate each other's refresh tokens.
 	refreshMu sync.Mutex
+	// lastRefreshFail is when the last refresh attempt failed (all variants).
+	// Guarded by refreshMu. Used to throttle proactive retries.
+	lastRefreshFail time.Time
 
 	// lifetimeCtx is cancelled by Disconnect to bound background goroutines
 	// (cmdLocate fallback GQL call, 25-second locate-window timer) to the
@@ -150,12 +153,8 @@ func (c *XploraClient) Connect(ctx context.Context) {
 	}
 	c.stopPolling()
 
-	// Proactively refresh the token if it is near expiry.
-	if c.auth.NeedsRefresh() {
-		if err := c.tryRefreshToken(ctx); err != nil {
-			c.log.Warn().Err(err).Msg("Token refresh failed on connect")
-		}
-	}
+	// Proactively refresh the token if it is inside the refresh window.
+	c.maybeProactiveRefresh(ctx)
 
 	// Validate session with a lightweight API call.
 	myInfo, err := c.gql.GetMyInfo(ctx)
@@ -302,11 +301,9 @@ func (c *XploraClient) Connect(ctx context.Context) {
 		}
 	}()
 
-	// Proactively refresh the token every 30 minutes so it never expires
-	// silently during long-running sessions without messages or restarts.
-	// NeedsRefresh() is a local check (no API call); it returns true when the
-	// token expires within 1 hour, so a 30-minute ticker always catches it
-	// with at least 30 minutes to spare.
+	// Every 30 minutes, check whether the token is inside the refresh window
+	// (see maybeProactiveRefresh). The check is local; the API is only called
+	// when a refresh is due.
 	//
 	// Every 10 minutes we also call GetMyInfo as a lightweight session health
 	// check. This detects mid-session invalidation (e.g. user logged in on
@@ -322,12 +319,7 @@ func (c *XploraClient) Connect(ctx context.Context) {
 			case <-fcmCtx.Done():
 				return
 			case <-refreshTicker.C:
-				if c.auth.NeedsRefresh() {
-					c.log.Info().Msg("Proactive token refresh triggered")
-					if err := c.tryRefreshToken(fcmCtx); err != nil {
-						c.log.Warn().Err(err).Msg("Proactive token refresh failed")
-					}
-				}
+				c.maybeProactiveRefresh(fcmCtx)
 			case <-healthTicker.C:
 				if _, err := c.gql.GetMyInfo(fcmCtx); err != nil {
 					c.log.Warn().Err(err).Msg("Session health check failed")
@@ -1625,36 +1617,6 @@ func (c *XploraClient) updateChildFCMID(matchIdx int, candidate, wuid, logSuffix
 	} else {
 		c.log.Warn().Str("wuid", wuid).Str("old", oldFCMID).Str("new", candidate).Msgf("Corrected wrong FCM user ID for child%s", logSuffix)
 	}
-}
-
-// tryRefreshToken exchanges the stored refresh token for a new access token
-// and saves the updated credentials to disk.
-func (c *XploraClient) tryRefreshToken(ctx context.Context) error {
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
-	uid := c.auth.UserID()
-	refreshToken := c.auth.RefreshToken()
-	if uid == "" || refreshToken == "" {
-		return fmt.Errorf("no refresh token available")
-	}
-	resp, err := c.gql.RefreshToken(ctx, uid, refreshToken)
-	if err != nil {
-		return fmt.Errorf("refreshToken: %w", err)
-	}
-	if !resp.Valid || resp.Token == "" {
-		return fmt.Errorf("refreshToken: server returned invalid token")
-	}
-	creds := &xplora.Credentials{
-		Token:        resp.Token,
-		RefreshToken: resp.RefreshToken,
-		ExpireDate:   string(resp.ExpireDate),
-		UserID:       uid,
-	}
-	if err := c.auth.SetCredentials(creds); err != nil {
-		return fmt.Errorf("saving refreshed credentials: %w", err)
-	}
-	c.log.Info().Msg("Access token refreshed successfully")
-	return nil
 }
 
 // ptrStr returns a pointer to a string (helper for bridgev2 APIs).
