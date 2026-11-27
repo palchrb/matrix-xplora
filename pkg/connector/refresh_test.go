@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -240,7 +241,7 @@ func TestRefreshValidFalseWithNewTokenIsTriedAndKept(t *testing.T) {
 	}
 }
 
-func TestRefreshValidFalseWithRejectedTokenRestoresOld(t *testing.T) {
+func TestRefreshKeepsNewTokenEvenIfRejected(t *testing.T) {
 	f := &fakeXplora{
 		accept:   func(string, string) bool { return false },
 		rotate:   func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
@@ -250,11 +251,45 @@ func TestRefreshValidFalseWithRejectedTokenRestoresOld(t *testing.T) {
 	creds.W360Token, creds.W360Secret = "", ""
 	c := newTestClient(t, f, creds)
 
-	if err := c.tryRefreshToken(t.Context()); err == nil {
-		t.Fatal("expected an error when the rotated token is rejected")
+	// The old refresh token is used up by the renewal, so restoring it would
+	// log the bridge out (2026-11-26). The new tokens must be kept.
+	if err := c.tryRefreshToken(t.Context()); err != nil {
+		t.Fatalf("renewal should succeed even if the check fails: %v", err)
 	}
-	if got := c.auth.Creds(); got.Token != "oldtok" || got.RefreshToken != "rt" {
-		t.Fatalf("old credentials not restored: %+v", got)
+	if got := c.auth.Creds(); got.Token != "rotated" || got.RefreshToken != "rt2" {
+		t.Fatalf("new credentials not kept: %+v", got)
+	}
+	myInfoCalls := 0
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, "ReadMyInfo ") {
+			myInfoCalls++
+		}
+	}
+	if want := 1 + len(verifyRetryDelays); myInfoCalls != want {
+		t.Fatalf("readMyInfo calls = %d, want %d (initial + retries)", myInfoCalls, want)
+	}
+}
+
+func TestRefreshCheckRetriesUntilTokenIsAccepted(t *testing.T) {
+	checks := 0
+	f := &fakeXplora{
+		accept: func(string, string) bool { return false },
+		rotate: func(h, uid string) bool { return strings.HasPrefix(h, "Open ") && uid == "parent" },
+		// The first check right after renewal fails, as on 2026-11-26.
+		myInfoOK: func(string) bool { checks++; return checks > 1 },
+	}
+	creds := baseCreds()
+	creds.W360Token, creds.W360Secret = "", ""
+	c := newTestClient(t, f, creds)
+
+	if err := c.tryRefreshToken(t.Context()); err != nil {
+		t.Fatalf("renewal failed: %v", err)
+	}
+	if got := c.auth.Creds(); got.Token != "rotated" {
+		t.Fatalf("new token not kept: %+v", got)
+	}
+	if checks != 2 {
+		t.Fatalf("checks = %d, want 2", checks)
 	}
 }
 
@@ -320,4 +355,9 @@ func TestMaybeRenewAfterExpiry(t *testing.T) {
 	if got := c.auth.Creds(); got.Token != "rotated" {
 		t.Fatalf("expected renewal of an expired token, token = %q", got.Token)
 	}
+}
+
+func TestMain(m *testing.M) {
+	verifyRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	os.Exit(m.Run())
 }

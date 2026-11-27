@@ -27,6 +27,10 @@ import (
 //     minutes after). After 3 hours a refresh token was gone; the limit in
 //     between is unknown.
 //
+// A new token can be rejected for a moment right after renewal (once, 16 ms
+// after, while ~50 ms always worked), so the bridge checks it with retries
+// and always keeps the new tokens: the old refresh token is used up.
+//
 // So the bridge renews shortly before each expiry (renewBefore), on startup
 // if the token is expired or nearly so, and whenever a call is rejected with
 // E000004. This repeats every ~10 minutes once the first 35-day token has
@@ -157,9 +161,12 @@ func (c *XploraClient) refreshLocked(ctx context.Context) error {
 			return fmt.Errorf("saving refreshed credentials: %w", err)
 		}
 		if err := c.verifyAfterRefresh(ctx, &next); err != nil {
-			c.log.Error().Err(err).Str("mode", a.mode()).Msg("Refreshed token was rejected; restoring previous credentials")
-			_ = c.auth.SetCredentials(old)
-			return fmt.Errorf("refreshed token rejected: %w", err)
+			// Keep the new tokens anyway. The renewal has used up the old
+			// refresh token, so going back to the old credentials can never
+			// work (that is what logged the bridge out on 2026-11-26). If the
+			// new token really is bad, the next E000004 renews again with the
+			// new refresh token.
+			c.log.Warn().Err(err).Str("mode", a.mode()).Msg("Renewed token not accepted yet; keeping it anyway")
 		}
 		exp, _ := xplora.ParseExpireDate(next.ExpireDate)
 		c.log.Info().Str("mode", a.mode()).Time("expires", exp).Msg("Access token refreshed successfully")
@@ -220,11 +227,17 @@ func idKind(id string, creds *xplora.Credentials) string {
 	}
 }
 
-// verifyAfterRefresh checks that normal API calls work with the new token. If
-// they fail while w360 tokens are in use, the w360 pair may belong to the old
-// token, so it is dropped and the plain token is tried.
+// verifyRetryDelays are the pauses between checks of a freshly renewed token.
+// A check 16 ms after a renewal once got E000004 although the token was new;
+// most likely it had not yet reached every Xplora server.
+var verifyRetryDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+// verifyAfterRefresh checks that normal API calls work with the new token,
+// retrying a few times. If they still fail while w360 tokens are in use, the
+// w360 pair may belong to the old token, so it is dropped and the plain token
+// is tried. It never restores the old credentials (see refreshLocked).
 func (c *XploraClient) verifyAfterRefresh(ctx context.Context, creds *xplora.Credentials) error {
-	_, err := c.gql.GetMyInfo(ctx)
+	err := c.checkSessionWithRetries(ctx)
 	if err == nil {
 		return nil
 	}
@@ -237,11 +250,30 @@ func (c *XploraClient) verifyAfterRefresh(ctx context.Context, creds *xplora.Cre
 	if serr := c.auth.SetCredentials(&cleared); serr != nil {
 		return serr
 	}
-	if _, err2 := c.gql.GetMyInfo(ctx); err2 != nil {
-		return err2
+	if err := c.checkSessionWithRetries(ctx); err != nil {
+		return err
 	}
 	c.log.Info().Msg("Dropped w360 tokens after refresh; the plain token works")
 	return nil
+}
+
+// checkSessionWithRetries calls readMyInfo, retrying after verifyRetryDelays
+// while it fails with an authentication error.
+func (c *XploraClient) checkSessionWithRetries(ctx context.Context) error {
+	_, err := c.gql.GetMyInfo(ctx)
+	for _, d := range verifyRetryDelays {
+		if !isAuthError(err) {
+			return err // success, or an error that waiting will not fix
+		}
+		c.log.Debug().Err(err).Dur("retry_in", d).Msg("Renewed token not accepted yet; checking again")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+		}
+		_, err = c.gql.GetMyInfo(ctx)
+	}
+	return err
 }
 
 // maybeRenew renews the token when it expires within renewBefore (or has
